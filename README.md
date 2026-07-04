@@ -1,4 +1,4 @@
-# Singbox Subscribe Convert for OpenWrt 25.12 / Linksys E8450
+# Singbox Subscribe Convert for OpenWrt 25.12 arm64/aarch64
 
 This bundle contains two OpenWrt package source directories:
 
