@@ -1,0 +1,26 @@
+{
+  "luci-app-singbox-subscribe-convert": {
+    "description": "Grant access to Singbox Subscribe Convert LuCI app",
+    "read": {
+      "ubus": {
+        "singbox-subscribe-convert": [ "status", "list_templates", "read_template" ]
+      },
+      "uci": [ "singbox_subscribe_convert" ],
+      "file": {
+        "/var/log/singbox-subscribe-convert/*": [ "read" ],
+        "/www/singbox-subscribe-convert/templates/*": [ "read" ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "singbox-subscribe-convert": [ "action", "write_template", "delete_template" ]
+      },
+      "uci": [ "singbox_subscribe_convert" ],
+      "file": {
+        "/www/singbox-subscribe-convert/templates/*": [ "write" ],
+        "/etc/config/singbox_subscribe_convert": [ "write" ],
+        "/etc/singbox-subscribe-convert/*": [ "write" ]
+      }
+    }
+  }
+}

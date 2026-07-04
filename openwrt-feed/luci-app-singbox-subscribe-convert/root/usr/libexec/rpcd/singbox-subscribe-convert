@@ -1,0 +1,213 @@
+#!/bin/sh
+
+. /lib/functions.sh
+CONFIG='singbox_subscribe_convert'
+TPL_DIR='/www/singbox-subscribe-convert/templates'
+GEN='/usr/share/singbox-subscribe-convert/generate-config.sh'
+UPDATE='/usr/share/singbox-subscribe-convert/update.sh'
+VALIDATE='/usr/share/singbox-subscribe-convert/validate-template.sh'
+INIT='/etc/init.d/singbox-subscribe-convert'
+
+json_string() {
+	awk 'BEGIN{ORS=""}{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\r/,"\\r"); printf "%s%s", sep, $0; sep="\\n"}'
+}
+
+json_arg() {
+	local key="$1" input="$2"
+	printf '%s' "$input" | jsonfilter -e "@.$key" 2>/dev/null
+}
+
+sanitize_id() {
+	printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | sed 's/-/_/g'
+}
+
+sanitize_file() {
+	local f
+	[ -n "$1" ] || return 0
+	f=$(basename "$1" | tr -cd 'A-Za-z0-9._-')
+	[ -n "$f" ] || return 0
+	case "$f" in
+		*.json) ;;
+		*) f="$f.json" ;;
+	esac
+	printf '%s' "$f"
+}
+
+urlencode() {
+	# Minimal percent encoder for ASCII URL query values.
+	local s="$1" out="" i c hex
+	i=1
+	while [ $i -le ${#s} ]; do
+		c=$(printf '%s' "$s" | cut -c "$i")
+		case "$c" in
+			[a-zA-Z0-9.~_-]) out="$out$c" ;;
+			*) hex=$(printf '%02X' "'${c}"); out="$out%$hex" ;;
+		esac
+		i=$((i + 1))
+	done
+	printf '%s' "$out"
+}
+
+action_cmd() {
+	local name="$1"
+	case "$name" in
+		start) "$INIT" start ;;
+		stop) "$INIT" stop ;;
+		restart) "$INIT" restart ;;
+		enable) uci set $CONFIG.main.enabled='1'; uci commit $CONFIG; "$INIT" enable ;;
+		disable) "$INIT" stop >/dev/null 2>&1 || true; uci set $CONFIG.main.enabled='0'; uci commit $CONFIG; "$INIT" disable ;;
+		generate) "$GEN" ;;
+		refresh) "$UPDATE" refresh ;;
+		check) "$UPDATE" check ;;
+		update|apply) "$UPDATE" apply ;;
+		log) tail -n 120 /var/log/singbox-subscribe-convert/update.log 2>/dev/null || true ;;
+		*) echo "unknown action: $name" >&2; return 2 ;;
+	esac
+}
+
+status_call() {
+	config_load "$CONFIG"
+	local enabled port password sub_url def output running health update_log pass_q template_q converted_url
+	config_get_bool enabled main enabled 0
+	config_get port main port 9716
+	config_get password main password 'change_me'
+	config_get sub_url main subscription_url ''
+	config_get def main default_template openwrt
+	config_get output main output_config '/etc/momo/profiles/config.json'
+	if "$INIT" running >/dev/null 2>&1; then running=1; else running=0; fi
+	pass_q=$(urlencode "$password")
+	template_q=$(urlencode "$def")
+	converted_url="http://127.0.0.1:${port}/?password=${pass_q}&template=${template_q}"
+	health=$(curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:$port/health" 2>/dev/null || true)
+	update_log=$(tail -n 40 /var/log/singbox-subscribe-convert/update.log 2>/dev/null | json_string)
+	printf '{"enabled":%s,"running":%s,"port":%s,"subscription_set":%s,"default_template":"%s","output_config":"%s","converted_url":"%s","momo_profile_path":"%s","health":"%s","update_log":"%s"}\n' \
+		"$enabled" "$running" "$port" "$([ -n "$sub_url" ] && echo true || echo false)" \
+		"$(printf '%s' "$def" | json_string)" \
+		"$(printf '%s' "$output" | json_string)" \
+		"$(printf '%s' "$converted_url" | json_string)" \
+		"/cgi-bin/luci/admin/services/momo/profile" \
+		"$(printf '%s' "$health" | json_string)" \
+		"$update_log"
+}
+
+list_templates_call() {
+	mkdir -p "$TPL_DIR"
+	config_load "$CONFIG"
+	local first=1
+	printf '{"templates":['
+	_list_one() {
+		local sid="$1" enabled name file no_node size mtime
+		config_get_bool enabled "$sid" enabled 1
+		config_get name "$sid" name "$sid"
+		config_get file "$sid" file "$sid.json"
+		config_get no_node "$sid" no_node '➜ Direct'
+		[ -f "$TPL_DIR/$file" ] && size=$(wc -c < "$TPL_DIR/$file") || size=0
+		[ -f "$TPL_DIR/$file" ] && mtime=$(date -r "$TPL_DIR/$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) || mtime=''
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"id":"%s","enabled":%s,"name":"%s","file":"%s","no_node":"%s","size":%s,"mtime":"%s"}' \
+			"$sid" "$enabled" \
+			"$(printf '%s' "$name" | json_string)" \
+			"$(printf '%s' "$file" | json_string)" \
+			"$(printf '%s' "$no_node" | json_string)" \
+			"$size" "$(printf '%s' "$mtime" | json_string)"
+	}
+	config_foreach _list_one template
+	printf ']}\n'
+}
+
+read_template_call() {
+	local input id file content
+	input=$(cat)
+	id=$(sanitize_id "$(json_arg id "$input")")
+	file=$(json_arg file "$input")
+	config_load "$CONFIG"
+	if [ -n "$id" ]; then config_get file "$id" file "$id.json"; fi
+	file=$(sanitize_file "$file")
+	[ -f "$TPL_DIR/$file" ] || { printf '{"error":"not found"}\n'; return 1; }
+	content=$(cat "$TPL_DIR/$file" | json_string)
+	printf '{"file":"%s","content":"%s"}\n' "$(printf '%s' "$file" | json_string)" "$content"
+}
+
+write_template_call() {
+	local input id name file no_node enabled content tmp
+	input=$(cat)
+	id=$(sanitize_id "$(json_arg id "$input")")
+	name=$(json_arg name "$input")
+	file=$(sanitize_file "$(json_arg file "$input")")
+	no_node=$(json_arg no_node "$input")
+	enabled=$(json_arg enabled "$input")
+	content=$(json_arg content "$input")
+	[ -n "$id" ] || { printf '{"error":"id required"}\n'; return 1; }
+	[ -n "$file" ] || { printf '{"error":"file required"}\n'; return 1; }
+	[ -n "$name" ] || name="$id"
+	[ -n "$no_node" ] || no_node='➜ Direct'
+	case "$enabled" in true|1|yes|on) enabled=1 ;; *) enabled=0 ;; esac
+	mkdir -p "$TPL_DIR"
+	tmp="$TPL_DIR/$file.$$"
+	printf '%s' "$content" > "$tmp" || { printf '{"error":"write failed"}\n'; return 1; }
+	"$VALIDATE" "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; printf '{"error":"template validation failed"}\n'; return 1; }
+	mv "$tmp" "$TPL_DIR/$file"
+	chmod 0644 "$TPL_DIR/$file"
+	uci -q get $CONFIG.$id >/dev/null 2>&1 || uci set $CONFIG.$id='template'
+	uci set $CONFIG.$id.enabled="$enabled"
+	uci set $CONFIG.$id.name="$name"
+	uci set $CONFIG.$id.file="$file"
+	uci set $CONFIG.$id.no_node="$no_node"
+	uci commit "$CONFIG"
+	"$GEN" >/dev/null 2>&1 || true
+	if "$INIT" running >/dev/null 2>&1; then "$INIT" restart >/dev/null 2>&1 || true; fi
+	printf '{"ok":true,"id":"%s","file":"%s"}\n' "$id" "$(printf '%s' "$file" | json_string)"
+}
+
+delete_template_call() {
+	local input id file def
+	input=$(cat)
+	id=$(sanitize_id "$(json_arg id "$input")")
+	[ -n "$id" ] || { printf '{"error":"id required"}\n'; return 1; }
+	config_load "$CONFIG"
+	config_get def main default_template openwrt
+	[ "$id" = "$def" ] && { printf '{"error":"cannot delete current default_template"}\n'; return 1; }
+	config_get file "$id" file ''
+	[ -n "$file" ] && rm -f "$TPL_DIR/$(sanitize_file "$file")"
+	uci -q delete $CONFIG.$id
+	uci commit "$CONFIG"
+	"$GEN" >/dev/null 2>&1 || true
+	if "$INIT" running >/dev/null 2>&1; then "$INIT" restart >/dev/null 2>&1 || true; fi
+	printf '{"ok":true}\n'
+}
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+  "status": {},
+  "action": { "name": "string" },
+  "list_templates": {},
+  "read_template": { "id": "string", "file": "string" },
+  "write_template": { "id": "string", "name": "string", "file": "string", "no_node": "string", "enabled": "bool", "content": "string" },
+  "delete_template": { "id": "string" }
+}
+EOF
+		;;
+	call)
+		case "$2" in
+			status) status_call ;;
+			list_templates) list_templates_call ;;
+			read_template) read_template_call ;;
+			write_template) write_template_call ;;
+			delete_template) delete_template_call ;;
+			action)
+				input=$(cat)
+				name=$(json_arg name "$input")
+				out=$(action_cmd "$name" 2>&1); rc=$?
+				printf '{"code":%s,"output":"%s"}\n' "$rc" "$(printf '%s' "$out" | json_string)"
+				;;
+			*) printf '{"error":"unknown method"}\n'; exit 1 ;;
+		esac
+		;;
+	*)
+		echo "usage: $0 {list|call method}" >&2
+		exit 1
+		;;
+esac

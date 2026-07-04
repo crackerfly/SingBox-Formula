@@ -1,0 +1,13 @@
+{
+  "admin/services/singbox-subscribe-convert": {
+    "title": "Sing-box Subscribe Convert",
+    "order": 80,
+    "action": {
+      "type": "view",
+      "path": "singbox-subscribe-convert"
+    },
+    "depends": {
+      "acl": [ "luci-app-singbox-subscribe-convert" ]
+    }
+  }
+}

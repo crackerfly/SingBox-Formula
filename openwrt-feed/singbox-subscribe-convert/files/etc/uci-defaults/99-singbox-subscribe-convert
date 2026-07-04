@@ -1,0 +1,15 @@
+#!/bin/sh
+mkdir -p /etc/singbox-subscribe-convert /var/lib/singbox-subscribe-convert/cache /var/log/singbox-subscribe-convert /www/singbox-subscribe-convert/templates
+
+# Migrate the first generated package defaults, but leave explicit custom values alone.
+if uci -q get singbox_subscribe_convert.main >/dev/null 2>&1; then
+	port="$(uci -q get singbox_subscribe_convert.main.port)"
+	[ -z "$port" ] || [ "$port" = "9000" ] && uci set singbox_subscribe_convert.main.port='9716'
+	output="$(uci -q get singbox_subscribe_convert.main.output_config)"
+	[ -z "$output" ] || [ "$output" = "/etc/sing-box/config.json" ] && uci set singbox_subscribe_convert.main.output_config='/etc/momo/profiles/config.json'
+	uci -q delete singbox_subscribe_convert.main.singbox_init
+	uci commit singbox_subscribe_convert
+fi
+
+[ -x /usr/share/singbox-subscribe-convert/generate-config.sh ] && /usr/share/singbox-subscribe-convert/generate-config.sh >/dev/null 2>&1 || true
+exit 0
