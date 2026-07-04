@@ -1,0 +1,218 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Project-Id-Version: luci-app-singbox-formula\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Language-Team: none\n"
+"MIME-Version: 1.0\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Done"
+msgstr ""
+
+msgid "Nothing to copy."
+msgstr ""
+
+msgid "Copied to clipboard."
+msgstr ""
+
+msgid "Copy failed. Please copy the URL manually."
+msgstr ""
+
+msgid "SingBox Formula"
+msgstr ""
+
+msgid "Convert a source subscription into a sing-box JSON profile and update the configured output file. This app does not manage the sing-box runtime. Use OpenWrt-momo to run sing-box, firewall rules, access control and profile scheduling."
+msgstr ""
+
+msgid "Basic Settings"
+msgstr ""
+
+msgid "Enable converter service"
+msgstr ""
+
+msgid "Boot delay"
+msgstr ""
+
+msgid "Seconds to wait before starting the converter service during boot. Manual start is not delayed."
+msgstr ""
+
+msgid "Source subscription URL"
+msgstr ""
+
+msgid "Converter access password"
+msgstr ""
+
+msgid "Converter service port"
+msgstr ""
+
+msgid "Subscription refresh interval"
+msgstr ""
+
+msgid "Minutes. This maps to subscription.refresh_interval in config.yaml."
+msgstr ""
+
+msgid "Default template"
+msgstr ""
+
+msgid "Output config path"
+msgstr ""
+
+msgid "The generated file is written here after validation. OpenWrt-momo can use this profile path."
+msgstr ""
+
+msgid "Template base URL"
+msgstr ""
+
+msgid "Local HTTP URL prefix used by the converter to fetch JSON templates."
+msgstr ""
+
+msgid "OpenWrt-momo Integration"
+msgstr ""
+
+msgid "This converter is intended to work together with OpenWrt-momo. Paste the local converted URL below into the Momo profile or subscription field when you want Momo to fetch the generated sing-box JSON from this router."
+msgstr ""
+
+msgid "Open Momo Profile"
+msgstr ""
+
+msgid "Open Momo"
+msgstr ""
+
+msgid "Local converted URL"
+msgstr ""
+
+msgid "Copy URL"
+msgstr ""
+
+msgid "The URL uses 127.0.0.1 and is meant for services running on this OpenWrt device. It is generated from saved settings. Save and apply first if you changed the port, password or default template."
+msgstr ""
+
+msgid "Not connected or service is not running."
+msgstr ""
+
+msgid "Converter Service"
+msgstr ""
+
+msgid "Status: "
+msgstr ""
+
+msgid "Running"
+msgstr ""
+
+msgid "Stopped"
+msgstr ""
+
+msgid "Port: "
+msgstr ""
+
+msgid "Default template: "
+msgstr ""
+
+msgid "Output: "
+msgstr ""
+
+msgid "Start converter"
+msgstr ""
+
+msgid "Stop converter"
+msgstr ""
+
+msgid "Restart converter"
+msgstr ""
+
+msgid "Enable autostart"
+msgstr ""
+
+msgid "Disable autostart"
+msgstr ""
+
+msgid "Generate config.yaml"
+msgstr ""
+
+msgid "Refresh subscription"
+msgstr ""
+
+msgid "Check generated config"
+msgstr ""
+
+msgid "Update output file"
+msgstr ""
+
+msgid "Update output file only writes the generated JSON file. It does not restart sing-box. Manage sing-box from OpenWrt-momo."
+msgstr ""
+
+msgid "Health Check"
+msgstr ""
+
+msgid "Recent Update Log"
+msgstr ""
+
+msgid "Yes"
+msgstr ""
+
+msgid "No"
+msgstr ""
+
+msgid "Edit"
+msgstr ""
+
+msgid "Delete"
+msgstr ""
+
+msgid "Template Management"
+msgstr ""
+
+msgid "Upload a local JSON template, edit an existing template, save a new template or delete unused templates. The current default_template cannot be deleted."
+msgstr ""
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Name"
+msgstr ""
+
+msgid "File"
+msgstr ""
+
+msgid "Size"
+msgstr ""
+
+msgid "Modified"
+msgstr ""
+
+msgid "Actions"
+msgstr ""
+
+msgid "Template ID"
+msgstr ""
+
+msgid "Template name"
+msgstr ""
+
+msgid "File name"
+msgstr ""
+
+msgid "Fallback outbound"
+msgstr ""
+
+msgid "Enable template"
+msgstr ""
+
+msgid "Upload JSON template"
+msgstr ""
+
+msgid "Save template"
+msgstr ""
+
+msgid "Clear editor"
+msgstr ""
+
+msgid "Template saved. Reload this page to refresh the list."
+msgstr ""
+
+msgid "Delete template "
+msgstr ""
+
+msgid "Template deleted."
+msgstr ""

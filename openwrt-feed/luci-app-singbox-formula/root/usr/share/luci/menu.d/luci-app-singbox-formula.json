@@ -1,0 +1,13 @@
+{
+  "admin/services/singbox-formula": {
+    "title": "SingBox Formula",
+    "order": 80,
+    "action": {
+      "type": "view",
+      "path": "singbox-formula"
+    },
+    "depends": {
+      "acl": [ "luci-app-singbox-formula" ]
+    }
+  }
+}

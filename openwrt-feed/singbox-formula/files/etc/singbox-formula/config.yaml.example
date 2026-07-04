@@ -1,0 +1,45 @@
+# This file is generated from /etc/config/singbox_formula.
+# Do not edit manually; use LuCI or run:
+#   /usr/share/singbox-formula/generate-config.sh
+server:
+  port: 9716
+  read_timeout: 15
+  write_timeout: 15
+  idle_timeout: 60
+
+auth:
+  password: 'change_me'
+
+subscription:
+  url: ''
+  timeout: 30
+  refresh_interval: 2
+
+templates:
+  openwrt:
+    url: 'http://127.0.0.1/singbox-formula/templates/openwrt-1.12-e8450.json'
+    name: 'OpenWrt 1.12 E8450'
+    no_node: '➜ Direct'
+    enabled: true
+
+default_template: 'openwrt'
+
+cache:
+  directory: '/var/lib/singbox-formula/cache'
+  node_file: 'node.json'
+  template_file: 'template.json'
+
+cloudflare:
+  enabled: false
+  purge_url: ''
+  api_token: ''
+  api_key: ''
+  api_email: ''
+
+logging:
+  production: true
+  file: '/var/log/singbox-formula/server.log'
+  level: 'info'
+  max_size: 10
+  max_backups: 3
+  max_age: 7

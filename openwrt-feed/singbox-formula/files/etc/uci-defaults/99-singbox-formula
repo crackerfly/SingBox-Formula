@@ -1,0 +1,22 @@
+#!/bin/sh
+mkdir -p /etc/singbox-formula /var/lib/singbox-formula/cache /var/log/singbox-formula /www/singbox-formula/templates
+
+# Migrate the first generated package defaults, but leave explicit custom values alone.
+if uci -q get singbox_formula.main >/dev/null 2>&1; then
+	port="$(uci -q get singbox_formula.main.port)"
+	case "$port" in ''|9000) uci set singbox_formula.main.port='9716' ;; esac
+	output="$(uci -q get singbox_formula.main.output_config)"
+	case "$output" in ''|/etc/sing-box/config.json) uci set singbox_formula.main.output_config='/etc/momo/profiles/config.json' ;; esac
+	uci -q delete singbox_formula.main.singbox_init
+	uci commit singbox_formula
+fi
+
+# Register the service with procd (creates the rc.d symlink) so that the boot()
+# hook is always considered. Whether it actually starts on boot is then governed
+# solely by the UCI 'enabled' flag (the "Enable converter service" checkbox),
+# which boot() checks. This keeps the checkbox as the single source of truth for
+# autostart instead of requiring a separate "Enable autostart" click.
+[ -x /etc/init.d/singbox-formula ] && /etc/init.d/singbox-formula enable >/dev/null 2>&1 || true
+
+[ -x /usr/share/singbox-formula/generate-config.sh ] && /usr/share/singbox-formula/generate-config.sh >/dev/null 2>&1 || true
+exit 0
