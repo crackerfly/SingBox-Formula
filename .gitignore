@@ -1,0 +1,22 @@
+# OpenWrt SDK/build output
+openwrt-sdk/
+dl/
+bin/
+build_dir/
+staging_dir/
+tmp/
+logs/
+output_pkg/
+
+# Local archives and generated packages
+*.apk
+*.ipk
+*.tar.gz
+*.zip
+*.sha256
+SHA256SUMS
+
+# Local editor/system files
+.DS_Store
+.idea/
+.vscode/
