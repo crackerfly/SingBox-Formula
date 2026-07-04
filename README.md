@@ -1,4 +1,4 @@
-# SingBox Formula for OpenWrt 25.12 / Linksys E8450
+# SingBox Formula for OpenWrt 25.12
 
 **Version:** 1.1.0 (both `singbox-formula` and `luci-app-singbox-formula` are versioned together).
 
