@@ -10,7 +10,7 @@ template, and produces a ready-to-use **sing-box** profile — which a sing-box 
 > This app **does not run sing-box itself**. It only produces the profile. Use OpenWrt-momo (or
 > another runtime) to actually run sing-box, firewall rules, access control and scheduling.
 
-**Version:** 1.3.1 · **Two packages:** `singbox-formula` (service) + `luci-app-singbox-formula` (UI),
+**Two packages:** `singbox-formula` (service) + `luci-app-singbox-formula` (UI),
 versioned together.
 
 ---
