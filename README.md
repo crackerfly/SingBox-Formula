@@ -1,138 +1,289 @@
-# SingBox Formula for OpenWrt 25.12
+# SingBox Formula
 
-**Version:** 1.3.0 (both `singbox-formula` and `luci-app-singbox-formula` are versioned together).
+**A LuCI-managed subscription-to-sing-box converter for OpenWrt.**
 
-## What's new in 1.3.0
+SingBox Formula wraps the prebuilt [`sb-sub-c`](#the-sb-sub-c-binary) converter (v0.7.2) as a
+procd service and gives it a full LuCI front end. It fetches a node subscription, applies a JSON
+template, and produces a ready-to-use **sing-box** profile — which a sing-box runtime such as
+[OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo) can then load.
 
-- **The LuCI page is now split into two tabs:** *Overview* (basic settings, integration, converter service) and *Templates* (template management).
-- **Enable = master switch again.** Ticking *Enable converter service* and hitting Save & Apply now starts the converter immediately; unticking + Save & Apply stops it. The boot delay applies ONLY to autostart on boot — starting via Save & Apply or the buttons is immediate. Default boot delay lowered to `90` seconds. (This is done safely via a detached background reconcile, so Save & Apply does not hang.)
-- **Converter Service buttons show a spinner** while the action runs, then update to the new state (matching the System ▸ Startup style).
-- **Subscription format helper:** a new *Request sing-box format (flag=singbox)* switch (default on) auto-appends `flag=singbox` to the subscription URL, for providers that return a base64 / URI node list instead of sing-box JSON. It joins with `?` or `&` correctly and is skipped if the URL already has a `flag=` parameter.
-- **Integration section renamed** from *OpenWrt-momo Integration* to *Sing-Box Integration*; the two internal Momo links were replaced with a link to the OpenWrt-momo project on GitHub.
+> This app **does not run sing-box itself**. It only produces the profile. Use OpenWrt-momo (or
+> another runtime) to actually run sing-box, firewall rules, access control and scheduling.
 
-## What's new in 1.2.0
+**Version:** 1.3.1 · **Two packages:** `singbox-formula` (service) + `luci-app-singbox-formula` (UI),
+versioned together.
 
-- Default template is now `momo_template` (file `momo-template.json`); the shipped default converter password is `890716`.
-- **Converter Service buttons reworked.** Start/Stop is now a single toggle, and Enable/Disable autostart is a single toggle; both reflect and update live status. Actions now show a readable result (e.g. "Converter started.") instead of raw JSON, and the status card refreshes in place after each action.
-- Fixed the on-demand actions (**Refresh subscription / Check generated config / Update output file**) failing with `Failed to connect to 127.0.0.1:9716`. `start_service` no longer refuses to run when autostart is off, so these operations (and the Start button) can always bring the converter up; `ensure_converter` now waits for the HTTP port to actually answer before proceeding.
-- Fixed **Restart converter** printing a harmless `ubus call service delete ... (Not found)` when the service was stopped.
-- The converter now inherits the system timezone (`TZ`) so its log timestamps match the router's local time instead of UTC (only effective if the binary formats timestamps in local time).
+---
 
-## What's new in 1.1.1
+## Features
 
-- Fixed LuCI **Save & Apply** hanging with `XHR request aborted by browser` / an empty `/ubus/` response. Root cause: `reload_service()` called `/etc/init.d/singbox-formula restart` from inside the service's own procd reload trigger, which could stall procd and make the ubus apply call time out. `reload_service()` now regenerates `config.yaml` (the converter hot-reloads it via its built-in file watcher) and reconciles the instance with the `enabled` flag by calling the procd functions directly, without a nested init restart.
+- **Subscription → sing-box JSON** conversion driven entirely from LuCI.
+- **Two-tab LuCI UI** (`Services → SingBox Formula`): *Overview* (settings, integration, service
+  control) and *Templates* (template management).
+- **One-click service control** with an auto-refreshing status card and spinner feedback: restart,
+  refresh subscription, validate the generated config, and write the output file. The converter is
+  started/stopped from the *Enable converter service* switch in Basic Settings.
+- **Converter version** (`sb-sub-c`) is shown on the status line.
+- **Template management**: upload, edit, enable/disable and delete JSON templates; templates are
+  served locally to the converter over HTTP.
+- **`flag=singbox` helper**: automatically appends `flag=singbox` to your subscription URL so
+  providers that return a base64 / URI node list hand back sing-box JSON instead (toggleable).
+- **Safe apply model**: enabling the service and hitting *Save & Apply* starts it immediately; the
+  boot delay only applies to autostart on boot.
+- **Local timezone logs**: the converter inherits the system timezone so its timestamps match the
+  router clock (when the binary formats in local time).
 
-## What's new in 1.1.0
+---
 
-- Renamed the project to **SingBox Formula** (package slugs `singbox-formula` / `singbox_formula`, UCI config `singbox_formula`, paths under `/etc/singbox-formula`, `/usr/share/singbox-formula`, `/www/singbox-formula`).
-- Fixed RPC JSON encoding: tab characters and other control characters are now escaped, so tab-indented templates and log lines no longer break the `read_template` / `status` responses (previously produced invalid JSON that ubus rejected).
-- Fixed a case where an empty/invalid `port` could make the `status` response malformed JSON.
-- The **Enable converter service** checkbox is now the single master switch for boot autostart. The service is registered with procd at install, and the checkbox alone governs whether it starts on boot; the `Disable` action no longer removes the rc.d symlink, so re-enabling from the form works as expected.
-- Percent-encoding of the password/template in generated URLs is now byte-accurate (UTF-8 safe).
-- Output-file backups are pruned to the 5 most recent to avoid filling router flash.
-- The template list now refreshes in place after Save/Delete (no manual page reload needed).
+## System requirements
 
-This bundle contains two OpenWrt package source directories:
+- **OpenWrt 25.12** (uses the `apk` package manager and rpcd/LuCI from that release).
+- **Architecture:** the bundled `sb-sub-c` binary is **Linux AArch64 (arm64)**, built for
+  `aarch64` targets such as the **Linksys E8450 / Belkin RT3200** (MediaTek MT7622).
+- **Other architectures:** replace the bundled binary with the matching `sb-sub-c` v0.7.2 build for
+  your platform — see [Using a different architecture](#using-a-different-architecture).
+- **Runtime dependencies:** `libc`, `curl`, `jsonfilter` (service) and `luci-base`, `rpcd`,
+  `rpcd-mod-file` (UI). These are pulled in automatically by `apk`.
 
-- `singbox-formula`: wraps the provided `sb-sub-c` 0.7.2 Linux arm64/aarch64 binary, init service, update scripts and the default OpenWrt template.
-- `luci-app-singbox-formula`: LuCI JavaScript app for converter settings, file generation, output file updates and template upload/edit/delete management.
+---
 
-The default template is generated from the provided `singbox-config(1).json`. Static DNS, inbounds, route rules, rule-set download settings and Clash API settings are preserved. Node outbounds are replaced by `singbox-formula` placeholders:
+## Installation (apk)
 
-- `{{ Nodes }}` inserts all subscription node outbounds.
-- `{{ "..." | NotesName }}` dynamically fills selector/urltest groups such as Hong Kong, Singapore, US, Japan and Korea.
-- `no_node` defaults to `➜ Direct`, so empty groups remain valid.
-
-No real subscription URL or node credentials are included in this bundle. Fill your subscription URL and converter password in LuCI after installing.
-
-## Defaults in this build
-
-- Converter service port: `9716`
-- Default converter password: `890716` (change it in LuCI)
-- Boot delay: `300` seconds
-- Output config path: `/etc/momo/profiles/config.json`
-- Default template ID: `momo_template` (file `momo-template.json`)
-- Template directory: `/www/singbox-formula/templates`
-- Local converted URL format for services running on the router:
-
-```text
-http://127.0.0.1:9716/?password=<your-password>&template=momo_template
-```
-
-This app only converts subscriptions and updates the configured output JSON file. It does not start, stop, reload or restart sing-box. Use OpenWrt-momo to run sing-box, manage firewall rules, access control, profiles and scheduled restart.
-
-In LuCI, open:
-
-```text
-Services -> SingBox Formula
-Services -> Momo -> Profile
-```
-
-The converter page shows a one-click copy field named `Local converted URL`. Paste that URL into the OpenWrt-momo profile/subscription field when you want Momo to fetch the generated sing-box JSON from this router.
-
-## i18n
-
-All LuCI UI text defaults to English and is wrapped with LuCI `_()` translation calls where applicable. A POT template is included at:
-
-```text
-openwrt-feed/luci-app-singbox-formula/po/templates/singbox-formula.pot
-```
-
-No extra language package is included in this bundle.
-
-## Package build with OpenWrt SDK
-
-Copy `openwrt-feed/singbox-formula` and `openwrt-feed/luci-app-singbox-formula` into your OpenWrt SDK `package/` directory, then build:
+OpenWrt 25.12 ships the `apk` package manager. Build or obtain the two `.apk` files, copy them to the
+router (e.g. via `scp` to `/tmp`), then install:
 
 ```sh
-make package/singbox-formula/compile V=s
-make package/luci-app-singbox-formula/compile V=s
+apk add --allow-untrusted \
+    /tmp/singbox-formula-1.3.1-r1.apk \
+    /tmp/luci-app-singbox-formula-1.3.1-r1.apk
 ```
 
-On OpenWrt 25.12 targets, install the generated `.apk` packages with the target package manager.
+`--allow-untrusted` is needed for locally built, unsigned packages. If you serve the packages from a
+signed custom feed instead, you can simply `apk add luci-app-singbox-formula` (the service package is
+pulled in as a dependency).
 
-## Manual overlay test
+The LuCI post-install step clears the menu/template cache and restarts `rpcd` and `uhttpd`
+automatically. If the new page does not appear, hard-refresh the browser (Ctrl/Cmd+Shift+R).
 
-For quick testing on a Linksys E8450/aarch64 device, copy `manual-overlay` to `/`:
+**Upgrade:**
 
 ```sh
-scp -r manual-overlay/* root@10.10.10.1:/
-ssh root@10.10.10.1
-chmod +x /usr/bin/sb-sub-c /etc/init.d/singbox-formula /usr/share/singbox-formula/*.sh /usr/libexec/rpcd/singbox-formula
-/etc/uci-defaults/99-singbox-formula || /usr/share/singbox-formula/generate-config.sh
-/etc/init.d/rpcd restart
-/etc/init.d/uhttpd restart
+apk add --allow-untrusted /tmp/singbox-formula-1.3.1-r1.apk /tmp/luci-app-singbox-formula-1.3.1-r1.apk
 ```
 
-Then open LuCI: **Services -> SingBox Formula**.
+Your `/etc/config/singbox_formula` is a conffile and is preserved across upgrades.
 
-## Runtime commands
+**Uninstall:**
 
 ```sh
-# Generate converter config.yaml from UCI
-/usr/share/singbox-formula/generate-config.sh
+apk del luci-app-singbox-formula singbox-formula
+```
 
-# Start converter manually, no boot delay
+---
+
+## Quick start
+
+1. Open **Services → SingBox Formula → Overview**.
+2. Fill in **Source subscription URL** and, if you like, change the **Converter access password**
+   (default `890716`).
+3. Pick a **Default template** (the bundled `Momo Template` is preselected).
+4. Tick **Enable converter service** and click **Save & Apply** — the converter starts immediately.
+5. Point your sing-box runtime at the profile. Two options:
+   - **Read the output file** `/etc/momo/profiles/config.json` — refreshed when you click
+     **Update output file**; or
+   - **Fetch the local converted URL** shown in the *Sing-Box Integration* section
+     (`http://127.0.0.1:9716/?password=…&template=…`) — always up to date, since the converter
+     auto-refreshes on its own interval.
+
+---
+
+## The LuCI interface
+
+### Overview tab
+
+- **Basic Settings** — all options below.
+- **Sing-Box Integration** — the local converted URL (with a copy button) and a link to the
+  OpenWrt-momo project.
+- **Converter Service** — live status plus the action buttons.
+
+### Converter Service buttons
+
+| Button | Action |
+| --- | --- |
+| **Restart converter** | Stop then start the running process. |
+| **Generate config.yaml** | Rebuild `/etc/singbox-formula/config.yaml` from your saved settings. |
+| **Refresh subscription** | Tell the converter to re-fetch the subscription and rebuild its node list. |
+| **Check generated config** | Dry run: generate the final sing-box JSON, validate it, and leave it in `/tmp` — nothing is installed. |
+| **Update output file** | Generate + validate, then install the result to the **Output config path** (with a rotating backup). Does not restart sing-box. |
+
+Starting and stopping the converter is done from the **Enable converter service** switch in Basic
+Settings (tick/untick + *Save & Apply*), not from this section. Buttons show a spinner while running
+and the status card **refreshes automatically**, so it reflects the new state (e.g. right after Save
+& Apply, while the service is still coming up) without a manual page reload. *Refresh*, *Check* and
+*Update* start the converter automatically if it is not running.
+
+### Templates tab
+
+Manage the JSON templates the converter uses. Each template has an **Enabled** flag (whether the
+converter may use it) and is referenced by the **Default template** setting in Overview. The current
+default template cannot be deleted. Templates live in `/www/singbox-formula/templates/` and are
+served to the converter over `http://127.0.0.1/singbox-formula/templates/`.
+
+---
+
+## Configuration reference
+
+UCI config file: `/etc/config/singbox_formula`, section `config global 'main'`.
+
+| Option | Default | Unit / notes |
+| --- | --- | --- |
+| `enabled` | `0` | Master switch. Start on *Save & Apply* + autostart on boot. |
+| `boot_delay` | `90` | **Seconds.** Applies only to autostart on boot; manual/apply starts are immediate. |
+| `port` | `9716` | Converter HTTP port. |
+| `password` | `890716` | Converter access password (used in the converted URL). |
+| `subscription_url` | *(empty)* | Your source subscription URL. |
+| `subscription_timeout` | `60` | **Seconds.** HTTP timeout when the converter fetches the subscription. |
+| `refresh_interval` | `360` | **Minutes.** Converter auto-update interval (`subscription.refresh_interval`). |
+| `singbox_flag` | `1` | Append `flag=singbox` to the subscription URL (see FAQ). |
+| `default_template` | `momo_template` | Template ID used when a request does not specify one. Must be an enabled template. |
+| `cache_dir` | `/var/lib/singbox-formula/cache` | Converter cache directory. |
+| `log_file` | `/var/log/singbox-formula/server.log` | Converter log file. |
+| `output_config` | `/etc/momo/profiles/config.json` | Where the validated profile is written by *Update output file*. |
+| `template_base_url` | `http://127.0.0.1/singbox-formula/templates` | Local URL prefix the converter uses to fetch templates. |
+
+Template sections look like:
+
+```
+config template 'momo_template'
+	option enabled '1'
+	option name 'Momo Template'
+	option file 'momo-template.json'
+	option no_node '➜ Direct'
+```
+
+You can also change everything from the CLI, e.g.:
+
+```sh
+uci set singbox_formula.main.refresh_interval='30'
+uci commit singbox_formula
+/etc/init.d/singbox-formula restart
+```
+
+---
+
+## How it works
+
+```
+Subscription URL ──▶ sb-sub-c (HTTP :9716) ──▶ converted sing-box JSON
+        ▲                    ▲                          │
+        │                    │                          ├─▶ served at /?password=…&template=…
+  config.yaml         JSON templates                    │
+ (from your UCI)   (/www/singbox-formula/…)             └─▶ written to output_config
+                                                             by "Update output file"
+                                                                     │
+                                                                     ▼
+                                                     sing-box runtime (OpenWrt-momo)
+```
+
+1. `generate-config.sh` renders `/etc/singbox-formula/config.yaml` from your UCI settings.
+2. `sb-sub-c` runs under procd, fetches the subscription, applies the template, and serves the
+   converted profile on `127.0.0.1:<port>`. It auto-refreshes every `refresh_interval` minutes and
+   hot-reloads template/node changes via a file watcher.
+3. `update.sh apply` (the *Update output file* button) fetches the served profile, validates it, and
+   installs it to `output_config` with a rotating backup.
+4. OpenWrt-momo (or another runtime) reads the output file — or fetches the local URL directly — and
+   runs sing-box.
+
+Key paths:
+
+- Service: `/etc/init.d/singbox-formula` · RPC backend: `/usr/libexec/rpcd/singbox_formula`
+- Converter config: `/etc/singbox-formula/config.yaml`
+- Helper scripts: `/usr/share/singbox-formula/{generate-config.sh,update.sh,validate-template.sh}`
+- Logs: `/var/log/singbox-formula/{update.log,server.log}`
+
+---
+
+## FAQ
+
+**Q: I ticked "Enable" and saved — does the converter start right away?**
+Yes. From 1.3.0, enabling the service and hitting *Save & Apply* starts it immediately. The
+**Boot delay** only delays autostart on boot; it never affects a save- or button-triggered start.
+
+**Q: How do I start or stop the converter?**
+Use the **Enable converter service** switch in Overview → Basic Settings, then *Save & Apply*.
+Ticking it starts the converter immediately (and enables autostart on boot); unticking it stops it.
+There is no separate Start/Stop button — use **Restart converter** if you just need to restart the
+running process.
+
+**Q: Where do I change the auto-update interval (the `"interval"` value in the log)?**
+That is `refresh_interval` (in **minutes**, default `360`) under Overview → Basic Settings. Change it,
+*Save & Apply*, then **Restart converter** so the scheduler re-reads it. The log line will then show
+your new value (e.g. `360m0s`).
+
+**Q: What are the units of `subscription_timeout`?**
+Seconds. `refresh_interval` is minutes; `subscription_timeout` is a plain seconds value.
+
+**Q: Default template vs. a template's Enabled flag?**
+A template's **Enabled** flag decides whether the converter may use it at all. **Default template**
+decides which enabled template is used when a request does not specify one. The default must point at
+an **enabled** template.
+
+**Q: My subscription returns base64/URI text instead of sing-box JSON.**
+Keep **Request sing-box format (flag=singbox)** enabled (the default). It appends `flag=singbox` to
+your subscription URL so the provider returns sing-box format. It joins with `?` or `&` correctly and
+is skipped automatically if your URL already has a `flag=` parameter. Turn it off if a provider
+misbehaves with the flag.
+
+**Q: The converter's log timestamps are in UTC, not my timezone.**
+The service injects the system timezone (`TZ`) so `sb-sub-c` can log local time. If it still logs
+UTC (a trailing `Z`), that build of the binary hardcodes UTC internally and cannot be changed from
+outside. The app's own `update.log` already uses local time.
+
+**Q: I see `ERROR ... parse node file error: unexpected end of JSON input`.**
+Harmless and transient: the file watcher read `node.json` mid-write. The converter immediately
+re-fetches and succeeds (the following `File fetched successfully` / update lines). Only investigate
+if it repeats continuously **and** the node count stays at 0.
+
+**Q: Save & Apply used to hang — is that fixed?**
+Yes. The service reconciles its running state in a detached background step, so the reload trigger
+returns immediately and *Save & Apply* does not stall.
+
+**Q: Does this run sing-box?**
+No. It only produces the profile. Install a runtime such as
+[OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo) to run sing-box.
+
+---
+
+## Using a different architecture
+
+The bundled `sb-sub-c` is a statically linked Linux **AArch64** Go binary
+(`ELF 64-bit LSB, ARM aarch64, statically linked`, ~14 MB). For any other target:
+
+1. Obtain the matching `sb-sub-c` **v0.7.2** build for your architecture.
+2. Replace the binary before building the package:
+   `openwrt-feed/singbox-formula/files/usr/bin/sb-sub-c` (keep the filename `sb-sub-c` and the
+   executable bit).
+3. Adjust `PKGARCH` if you want the package marked for that architecture, then rebuild.
+
+Already installed? You can also swap it live on the device:
+
+```sh
+/etc/init.d/singbox-formula stop
+cp /tmp/sb-sub-c /usr/bin/sb-sub-c && chmod 0755 /usr/bin/sb-sub-c
 /etc/init.d/singbox-formula start
-
-# Refresh subscription cache
-/usr/share/singbox-formula/update.sh refresh
-
-# Check generated sing-box config only
-/usr/share/singbox-formula/update.sh check
-
-# Generate, validate and install /etc/momo/profiles/config.json only
-/usr/share/singbox-formula/update.sh apply
 ```
 
-Boot delay is controlled by `/etc/config/singbox_formula` option `boot_delay`; default is 300 seconds and is applied only in the init script `boot()` path.
+---
 
+## Building from source
 
-## LuCI RPC backend note
+The packages live under `openwrt-feed/` (`singbox-formula` and `luci-app-singbox-formula`) and build
+with the standard OpenWrt SDK/buildroot for OpenWrt 25.12. Add the feed, select both packages, and
+build `.apk` outputs. A GitHub Actions workflow is included under `.github/workflows/`.
 
-The LuCI package installs both `singbox_formula` and `singbox-formula` rpcd objects for compatibility. After installing or upgrading packages manually, restart `rpcd` and `uhttpd` if the page reports `RPCError: Object not found`:
+---
 
-```sh
-/etc/init.d/rpcd restart
-/etc/init.d/uhttpd restart
-```
+## Credits
+
+- Converter binary: `sb-sub-c` v0.7.2 (bundled).
+- Intended companion runtime: [OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo).
