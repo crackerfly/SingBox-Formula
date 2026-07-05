@@ -1,0 +1,42 @@
+#!/bin/sh
+mkdir -p /etc/singbox-formula /var/lib/singbox-formula/cache /var/log/singbox-formula /www/singbox-formula/templates
+
+# Migrate the first generated package defaults, but leave explicit custom values alone.
+if uci -q get singbox_formula.main >/dev/null 2>&1; then
+	port="$(uci -q get singbox_formula.main.port)"
+	case "$port" in ''|9000) uci set singbox_formula.main.port='9716' ;; esac
+	output="$(uci -q get singbox_formula.main.output_config)"
+	case "$output" in ''|/etc/sing-box/config.json) uci set singbox_formula.main.output_config='/etc/momo/profiles/config.json' ;; esac
+	uci -q delete singbox_formula.main.singbox_init
+	uci commit singbox_formula
+fi
+
+# 1.2.0 migration: the shipped default template was renamed from 'openwrt'
+# (file openwrt-1.12-e8450.json) to 'momo_template' (file momo-template.json).
+# The old file no longer ships, so an upgraded install must be repointed or the
+# converter would 404 on the template. Preserve any customized name/enabled/
+# no_node, and only run once.
+if uci -q get singbox_formula.openwrt >/dev/null 2>&1 && ! uci -q get singbox_formula.momo_template >/dev/null 2>&1; then
+	_en="$(uci -q get singbox_formula.openwrt.enabled)"
+	_nm="$(uci -q get singbox_formula.openwrt.name)"
+	_nn="$(uci -q get singbox_formula.openwrt.no_node)"
+	uci -q delete singbox_formula.openwrt
+	uci set singbox_formula.momo_template='template'
+	uci set singbox_formula.momo_template.enabled="${_en:-1}"
+	uci set singbox_formula.momo_template.name="${_nm:-Momo Template}"
+	uci set singbox_formula.momo_template.file='momo-template.json'
+	uci set singbox_formula.momo_template.no_node="${_nn:-➜ Direct}"
+	[ "$(uci -q get singbox_formula.main.default_template)" = "openwrt" ] && \
+		uci set singbox_formula.main.default_template='momo_template'
+	uci commit singbox_formula
+fi
+
+# Register the service with procd (creates the rc.d symlink) so that the boot()
+# hook is always considered. Whether it actually starts on boot is then governed
+# solely by the UCI 'enabled' flag (the "Enable converter service" checkbox),
+# which boot() checks. This keeps the checkbox as the single source of truth for
+# autostart instead of requiring a separate "Enable autostart" click.
+[ -x /etc/init.d/singbox-formula ] && /etc/init.d/singbox-formula enable >/dev/null 2>&1 || true
+
+[ -x /usr/share/singbox-formula/generate-config.sh ] && /usr/share/singbox-formula/generate-config.sh >/dev/null 2>&1 || true
+exit 0
