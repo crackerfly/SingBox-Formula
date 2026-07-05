@@ -1,0 +1,20 @@
+{
+  "admin/services/singbox-formula": {
+    "title": "SingBox Formula",
+    "order": 80,
+    "action": { "type": "firstchild" },
+    "depends": { "acl": [ "luci-app-singbox-formula" ] }
+  },
+  "admin/services/singbox-formula/overview": {
+    "title": "Overview",
+    "order": 10,
+    "action": { "type": "view", "path": "singbox-formula/overview" },
+    "depends": { "acl": [ "luci-app-singbox-formula" ] }
+  },
+  "admin/services/singbox-formula/templates": {
+    "title": "Templates",
+    "order": 20,
+    "action": { "type": "view", "path": "singbox-formula/templates" },
+    "depends": { "acl": [ "luci-app-singbox-formula" ] }
+  }
+}
