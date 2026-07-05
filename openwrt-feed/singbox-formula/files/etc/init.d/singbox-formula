@@ -1,0 +1,81 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+NAME='singbox-formula'
+PROG='/usr/bin/sb-sub-c'
+CONFIG='singbox_formula'
+GEN='/usr/share/singbox-formula/generate-config.sh'
+CONF='/etc/singbox-formula/config.yaml'
+WORKDIR='/etc/singbox-formula'
+
+start_service() {
+	. /lib/functions.sh
+	config_load "$CONFIG"
+	[ -x "$PROG" ] || {
+		echo "$PROG not found or not executable"
+		return 1
+	}
+	# NOTE: we intentionally do NOT gate on the 'enabled' UCI flag here. 'enabled'
+	# controls autostart-on-boot (checked in boot()) and reconciliation on config
+	# apply (reload_service). A manual/on-demand start (Start button, or an update
+	# operation that needs the HTTP endpoint) must always be able to bring the
+	# converter up, regardless of the autostart flag.
+	"$GEN" >/dev/null || return 1
+	mkdir -p /var/lib/singbox-formula/cache /var/log/singbox-formula "$WORKDIR"
+	# Make the converter log in the system timezone instead of UTC. sb-sub-c is a
+	# Go binary; if it formats timestamps in local time it will pick this up. (If
+	# it hardcodes UTC internally, this has no effect.)
+	local tz
+	tz="$(uci -q get system.@system[0].timezone 2>/dev/null)"
+	procd_open_instance
+	procd_set_param command "$PROG" run -c "$CONF" -d "$WORKDIR"
+	[ -n "$tz" ] && procd_set_param env TZ="$tz"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+boot() {
+	. /lib/functions.sh
+	config_load "$CONFIG"
+	local enabled delay
+	config_get_bool enabled main enabled 0
+	[ "$enabled" = "1" ] || return 0
+	config_get delay main boot_delay 90
+	(
+		sleep "$delay"
+		/etc/init.d/$NAME start
+	) &
+}
+
+reload_service() {
+	. /lib/functions.sh
+	config_load "$CONFIG"
+	local enabled
+	config_get_bool enabled main enabled 0
+	# Regenerate config.yaml first. The converter has a built-in file watcher and
+	# hot-reloads content changes (password, subscription URL, templates) itself.
+	"$GEN" >/dev/null 2>&1
+	# Reconcile the RUNNING state to the 'enabled' flag so that ticking "enabled"
+	# and hitting Save & Apply starts the converter immediately (and unticking it
+	# stops it). We do this in a DETACHED background subshell on purpose:
+	#  - a synchronous "/etc/init.d/$NAME restart" from inside this reload trigger
+	#    stalls procd and hangs LuCI Save & Apply;
+	#  - backgrounding lets the reload return at once. The short sleep lets the UCI
+	#    apply transaction settle first. This path never uses boot_delay — that
+	#    delay only applies to autostart on boot (see boot()).
+	if [ "$enabled" = "1" ]; then
+		( sleep 1; /etc/init.d/"$NAME" start ) >/dev/null 2>&1 &
+	else
+		( sleep 1; /etc/init.d/"$NAME" stop ) >/dev/null 2>&1 &
+	fi
+	return 0
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$CONFIG"
+}
