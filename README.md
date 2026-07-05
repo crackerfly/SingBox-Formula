@@ -1,6 +1,26 @@
-# SingBox Formula for OpenWrt 25.12
+# SingBox Formula for OpenWrt 25.12 / Linksys E8450
 
-**Version:** 1.1.0 (both `singbox-formula` and `luci-app-singbox-formula` are versioned together).
+**Version:** 1.3.0 (both `singbox-formula` and `luci-app-singbox-formula` are versioned together).
+
+## What's new in 1.3.0
+
+- **The LuCI page is now split into two tabs:** *Overview* (basic settings, integration, converter service) and *Templates* (template management).
+- **Enable = master switch again.** Ticking *Enable converter service* and hitting Save & Apply now starts the converter immediately; unticking + Save & Apply stops it. The boot delay applies ONLY to autostart on boot — starting via Save & Apply or the buttons is immediate. Default boot delay lowered to `90` seconds. (This is done safely via a detached background reconcile, so Save & Apply does not hang.)
+- **Converter Service buttons show a spinner** while the action runs, then update to the new state (matching the System ▸ Startup style).
+- **Subscription format helper:** a new *Request sing-box format (flag=singbox)* switch (default on) auto-appends `flag=singbox` to the subscription URL, for providers that return a base64 / URI node list instead of sing-box JSON. It joins with `?` or `&` correctly and is skipped if the URL already has a `flag=` parameter.
+- **Integration section renamed** from *OpenWrt-momo Integration* to *Sing-Box Integration*; the two internal Momo links were replaced with a link to the OpenWrt-momo project on GitHub.
+
+## What's new in 1.2.0
+
+- Default template is now `momo_template` (file `momo-template.json`); the shipped default converter password is `890716`.
+- **Converter Service buttons reworked.** Start/Stop is now a single toggle, and Enable/Disable autostart is a single toggle; both reflect and update live status. Actions now show a readable result (e.g. "Converter started.") instead of raw JSON, and the status card refreshes in place after each action.
+- Fixed the on-demand actions (**Refresh subscription / Check generated config / Update output file**) failing with `Failed to connect to 127.0.0.1:9716`. `start_service` no longer refuses to run when autostart is off, so these operations (and the Start button) can always bring the converter up; `ensure_converter` now waits for the HTTP port to actually answer before proceeding.
+- Fixed **Restart converter** printing a harmless `ubus call service delete ... (Not found)` when the service was stopped.
+- The converter now inherits the system timezone (`TZ`) so its log timestamps match the router's local time instead of UTC (only effective if the binary formats timestamps in local time).
+
+## What's new in 1.1.1
+
+- Fixed LuCI **Save & Apply** hanging with `XHR request aborted by browser` / an empty `/ubus/` response. Root cause: `reload_service()` called `/etc/init.d/singbox-formula restart` from inside the service's own procd reload trigger, which could stall procd and make the ubus apply call time out. `reload_service()` now regenerates `config.yaml` (the converter hot-reloads it via its built-in file watcher) and reconciles the instance with the `enabled` flag by calling the procd functions directly, without a nested init restart.
 
 ## What's new in 1.1.0
 
@@ -28,14 +48,15 @@ No real subscription URL or node credentials are included in this bundle. Fill y
 ## Defaults in this build
 
 - Converter service port: `9716`
+- Default converter password: `890716` (change it in LuCI)
 - Boot delay: `300` seconds
 - Output config path: `/etc/momo/profiles/config.json`
-- Default template ID: `openwrt`
+- Default template ID: `momo_template` (file `momo-template.json`)
 - Template directory: `/www/singbox-formula/templates`
 - Local converted URL format for services running on the router:
 
 ```text
-http://127.0.0.1:9716/?password=<your-password>&template=openwrt
+http://127.0.0.1:9716/?password=<your-password>&template=momo_template
 ```
 
 This app only converts subscriptions and updates the configured output JSON file. It does not start, stop, reload or restart sing-box. Use OpenWrt-momo to run sing-box, manage firewall rules, access control, profiles and scheduled restart.
