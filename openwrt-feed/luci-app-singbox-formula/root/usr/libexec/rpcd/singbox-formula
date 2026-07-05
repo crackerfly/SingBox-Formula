@@ -1,3 +1,0 @@
-#!/bin/sh
-# Compatibility RPC object for older LuCI cache/package versions.
-exec /usr/libexec/rpcd/singbox_formula "$@"
