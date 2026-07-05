@@ -54,8 +54,8 @@ router (e.g. via `scp` to `/tmp`), then install:
 
 ```sh
 apk add --allow-untrusted \
-    /tmp/singbox-formula-1.3.1-r1.apk \
-    /tmp/luci-app-singbox-formula-1.3.1-r1.apk
+    /tmp/singbox-formula-*.apk \
+    /tmp/luci-app-singbox-formula-*.apk
 ```
 
 `--allow-untrusted` is needed for locally built, unsigned packages. If you serve the packages from a
@@ -68,7 +68,7 @@ automatically. If the new page does not appear, hard-refresh the browser (Ctrl/C
 **Upgrade:**
 
 ```sh
-apk add --allow-untrusted /tmp/singbox-formula-1.3.1-r1.apk /tmp/luci-app-singbox-formula-1.3.1-r1.apk
+apk add --allow-untrusted /tmp/singbox-formula-*.apk /tmp/luci-app-singbox-formula-*.apk
 ```
 
 Your `/etc/config/singbox_formula` is a conffile and is preserved across upgrades.
