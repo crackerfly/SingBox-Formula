@@ -41,7 +41,7 @@ jobs:
   build:
     name: OpenWrt ${{ github.event.inputs.openwrt_version || '25.12.5' }} ${{ github.event.inputs.target || 'mediatek/mt7622' }}
     runs-on: ubuntu-24.04
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
