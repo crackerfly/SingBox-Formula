@@ -10,7 +10,7 @@ template, and produces a ready-to-use **sing-box** profile — which a sing-box 
 > This app **does not run sing-box itself**. It only produces the profile. Use OpenWrt-momo (or
 > another runtime) to actually run sing-box, firewall rules, access control and scheduling.
 
-**Two packages:** `singbox-formula` (service) + `luci-app-singbox-formula` (UI),
+**Version:** 1.4.0 · **Two packages:** `singbox-formula` (service) + `luci-app-singbox-formula` (UI),
 versioned together.
 
 ---
@@ -20,16 +20,19 @@ versioned together.
 - **Subscription → sing-box JSON** conversion driven entirely from LuCI.
 - **Two-tab LuCI UI** (`Services → SingBox Formula`): *Overview* (settings, integration, service
   control) and *Templates* (template management).
-- **One-click service control** with an auto-refreshing status card and spinner feedback: restart,
-  refresh subscription, validate the generated config, and write the output file. The converter is
-  started/stopped from the *Enable converter service* switch in Basic Settings.
-- **Converter version** (`sb-sub-c`) is shown on the status line.
+- **One-click service control** with an auto-refreshing status card, per-button spinners and
+  transient floating toast feedback (no sticky banners). Subscription operations (Refresh / Check /
+  Update) run in the background, so a slow provider can never stall or time out the page.
+- **Truthful three-state status** — Stopped / Running (not ready) / Running — derived from both the
+  procd instance and a live health probe, plus the `sb-sub-c` converter version on the status line.
 - **Template management**: upload, edit, enable/disable and delete JSON templates; templates are
   served locally to the converter over HTTP.
 - **`flag=singbox` helper**: automatically appends `flag=singbox` to your subscription URL so
   providers that return a base64 / URI node list hand back sing-box JSON instead (toggleable).
-- **Safe apply model**: enabling the service and hitting *Save & Apply* starts it immediately; the
-  boot delay only applies to autostart on boot.
+- **Safe apply model**: *Save & Apply* brings the service in line with the Enable switch — it
+  starts the converter when enabled, stops it when disabled, and restarts it when settings actually
+  changed (detected via the committed config), so changes always take effect. The boot delay only
+  applies to autostart on boot.
 - **Local timezone logs**: the converter inherits the system timezone so its timestamps match the
   router clock (when the binary formats in local time).
 
@@ -39,7 +42,7 @@ versioned together.
 
 - **OpenWrt 25.12** (uses the `apk` package manager and rpcd/LuCI from that release).
 - **Architecture:** the bundled `sb-sub-c` binary is **Linux AArch64 (arm64)**, built for
-  `aarch64` targets such as the **Linksys E8450 / Belkin RT3200** (MediaTek MT7622).
+  `aarch64_cortex-a53` targets such as the **Linksys E8450 / Belkin RT3200** (MediaTek MT7622).
 - **Other architectures:** replace the bundled binary with the matching `sb-sub-c` v0.7.2 build for
   your platform — see [Using a different architecture](#using-a-different-architecture).
 - **Runtime dependencies:** `libc`, `curl`, `jsonfilter` (service) and `luci-base`, `rpcd`,
@@ -54,8 +57,8 @@ router (e.g. via `scp` to `/tmp`), then install:
 
 ```sh
 apk add --allow-untrusted \
-    /tmp/singbox-formula-*.apk \
-    /tmp/luci-app-singbox-formula-*.apk
+    /tmp/singbox-formula-1.4.0-r1.apk \
+    /tmp/luci-app-singbox-formula-1.4.0-r1.apk
 ```
 
 `--allow-untrusted` is needed for locally built, unsigned packages. If you serve the packages from a
@@ -68,7 +71,7 @@ automatically. If the new page does not appear, hard-refresh the browser (Ctrl/C
 **Upgrade:**
 
 ```sh
-apk add --allow-untrusted /tmp/singbox-formula-*.apk /tmp/luci-app-singbox-formula-*.apk
+apk add --allow-untrusted /tmp/singbox-formula-1.4.0-r1.apk /tmp/luci-app-singbox-formula-1.4.0-r1.apk
 ```
 
 Your `/etc/config/singbox_formula` is a conffile and is preserved across upgrades.
@@ -117,10 +120,13 @@ apk del luci-app-singbox-formula singbox-formula
 | **Update output file** | Generate + validate, then install the result to the **Output config path** (with a rotating backup). Does not restart sing-box. |
 
 Starting and stopping the converter is done from the **Enable converter service** switch in Basic
-Settings (tick/untick + *Save & Apply*), not from this section. Buttons show a spinner while running
-and the status card **refreshes automatically**, so it reflects the new state (e.g. right after Save
-& Apply, while the service is still coming up) without a manual page reload. *Refresh*, *Check* and
-*Update* start the converter automatically if it is not running.
+Settings (tick/untick + *Save & Apply*), not from this section. Buttons show a spinner while running,
+results appear as a transient floating toast, and the status card **refreshes automatically**.
+*Restart* waits until the old process has exited and the new one answers its health check before
+reporting the real outcome. *Refresh*, *Check* and *Update* run **in the background**: progress
+streams into the Recent Update Log, the action buttons stay disabled while one is running (even
+across page reloads), and a toast reports success or failure on completion. They start the converter
+automatically if it is not running.
 
 ### Templates tab
 
@@ -245,8 +251,15 @@ re-fetches and succeeds (the following `File fetched successfully` / update line
 if it repeats continuously **and** the node count stays at 0.
 
 **Q: Save & Apply used to hang — is that fixed?**
-Yes. The service reconciles its running state in a detached background step, so the reload trigger
-returns immediately and *Save & Apply* does not stall.
+Yes. The config reload only regenerates `config.yaml` (it never starts/stops from inside the reload
+trigger), so it returns immediately and *Save & Apply* does not stall. The LuCI page then waits for
+the commit to land (via the config mtime) and restarts the converter when enabled — so changed
+settings actually take effect — or stops it when disabled.
+
+**Q: Refresh / Check / Update returned a toast instantly — did anything actually happen?**
+Yes. These operations run in the background so a slow subscription provider can never stall the page
+or hit the ubus timeout. Progress appears live in the Recent Update Log, the buttons stay disabled
+while an operation runs, and a toast reports the real result when it finishes.
 
 **Q: Does this run sing-box?**
 No. It only produces the profile. Install a runtime such as
