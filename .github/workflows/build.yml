@@ -41,10 +41,29 @@ jobs:
   build:
     name: OpenWrt ${{ github.event.inputs.openwrt_version || '25.12.5' }} ${{ github.event.inputs.target || 'mediatek/mt7622' }}
     runs-on: ubuntu-24.04
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Set up pinned Go toolchain for tests
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+          cache-dependency-path: openwrt-feed/singbox-formula/src/go.sum
+
+      - name: Run source, shell, and converter tests
+        run: |
+          set -eux
+          for test_script in tests/shell/test_*.sh; do
+            sh "${test_script}"
+          done
+          node --check openwrt-feed/luci-app-singbox-formula/root/www/luci-static/resources/view/singbox-formula/overview.js
+          node --check openwrt-feed/luci-app-singbox-formula/root/www/luci-static/resources/view/singbox-formula/templates.js
+          sh -n openwrt-feed/luci-app-singbox-formula/root/usr/libexec/rpcd/singbox_formula
+          cd openwrt-feed/singbox-formula/src
+          go test -race ./...
+          go vet ./...
 
       - name: Install build dependencies
         run: |
@@ -158,11 +177,7 @@ jobs:
           cp -a "${PACKAGE_BASE}/${MAIN_PACKAGE}" "openwrt-sdk/package/custom/${MAIN_PACKAGE}"
           cp -a "${PACKAGE_BASE}/${LUCI_PACKAGE}" "openwrt-sdk/package/custom/${LUCI_PACKAGE}"
 
-          if [ ! -x "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/sb-sub-c" ]; then
-            chmod +x "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/sb-sub-c"
-          fi
-
-          file "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/sb-sub-c" || true
+          test ! -e "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/sb-sub-c"
 
       - name: Update and install feeds
         working-directory: openwrt-sdk
@@ -186,6 +201,14 @@ jobs:
           set -eux
           make package/custom/${MAIN_PACKAGE}/compile V=s -j"$(nproc)"
           make package/custom/${LUCI_PACKAGE}/compile V=s -j"$(nproc)"
+
+      - name: Verify target-built converter architecture
+        run: |
+          set -eux
+          CONVERTER="$(find openwrt-sdk/build_dir -type f -name sb-sub-c -perm -111 | head -n 1)"
+          test -n "${CONVERTER}"
+          file "${CONVERTER}" | tee converter-file.txt
+          grep -Eq 'ELF 64-bit.*(ARM aarch64|ARM64)' converter-file.txt
 
       - name: Prepare artifacts
         run: |
