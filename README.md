@@ -318,6 +318,15 @@ To upload the release using only GitHub's web interface:
 6. Treat the repository after the second commit as authoritative. An intermediate Actions result
    between the two batches may be ignored.
 
+Round 1 directory uploads may omit nested hidden paths inside
+`openwrt-feed/singbox-formula/src/`, or **Upload files** may reject them when submitted directly.
+Create every such missing path at its exact repository location with **Add file → Create new file**.
+The source-integrity tests accept the GitHub editor's addition of exactly one trailing LF
+only for `openwrt-feed/singbox-formula/src/.env` and
+`openwrt-feed/singbox-formula/src/.github/workflows/go-release-docker.yml`; the original bytes also
+remain valid. Two trailing LFs, CRLF, trailing spaces, content changes, and a single-LF variant of
+any other path are still rejected.
+
 ```sh
 sh tests/shell/test_generate_config.sh
 sh tests/shell/test_update.sh

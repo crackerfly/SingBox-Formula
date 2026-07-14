@@ -6,13 +6,15 @@ SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 
 . "$SCRIPT_DIR/harness.sh"
+. "$SCRIPT_DIR/source_integrity.sh"
 
 PACKAGE_DIR="$REPO_ROOT/openwrt-feed/singbox-formula"
-SOURCE_DIR="$PACKAGE_DIR/src"
+SOURCE_DIR=${SOURCE_DIR:-"$PACKAGE_DIR/src"}
 PACKAGE_MAKEFILE="$PACKAGE_DIR/Makefile"
 UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manifest"
 PATCHED_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.patched-paths"
 LOCAL_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-local-paths"
+WEB_SINGLE_LF_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.web-single-lf-paths"
 UPSTREAM_COMMIT=8222509aff98229886d304ef72e1d0affb087a62
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 LUMBERJACK_MIT_SHA256=4eb222b860ec541a0f981a01de5454ba50d09d38b2d09fa6894ed0bf6331293e
@@ -57,6 +59,15 @@ find_elf_files() {
 	' sh {} +
 }
 
+printf '%s\n' \
+	'.env' \
+	'.github/workflows/go-release-docker.yml' \
+	> "$TEST_TMP/expected-web-single-lf.paths"
+assert_files_equal \
+	"$TEST_TMP/expected-web-single-lf.paths" \
+	"$WEB_SINGLE_LF_PATHS" \
+	'limits web single-LF normalization to the two reviewed upstream paths'
+
 assert_file_content \
 	"$UPSTREAM_COMMIT" \
 	"$SOURCE_DIR/UPSTREAM_COMMIT" \
@@ -79,8 +90,13 @@ while IFS="$(printf '\t')" read -r path expected_mode expected_hash; do
 		continue
 	fi
 	if ! grep -Fqx "$path" "$PATCHED_PATHS"; then
-		actual_hash=$(sha256sum "$file"); actual_hash=${actual_hash%% *}
-		[ "$actual_hash" = "$expected_hash" ] || UPSTREAM_MISMATCHES="$UPSTREAM_MISMATCHES hash:$path"
+		if ! source_file_matches_manifest_hash \
+			"$file" \
+			"$expected_hash" \
+			"$path" \
+			"$WEB_SINGLE_LF_PATHS"; then
+			UPSTREAM_MISMATCHES="$UPSTREAM_MISMATCHES hash:$path"
+		fi
 	fi
 done < "$UPSTREAM_MANIFEST"
 assert_empty "$UPSTREAM_MISMATCHES" "preserves every untouched upstream byte and mode"
