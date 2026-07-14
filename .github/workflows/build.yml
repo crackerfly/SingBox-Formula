@@ -46,6 +46,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Restore executable modes after web upload
+        run: sh .github/scripts/restore-executable-modes.sh "$GITHUB_WORKSPACE"
+
       - name: Set up pinned Go toolchain for tests
         uses: actions/setup-go@v6
         with:
