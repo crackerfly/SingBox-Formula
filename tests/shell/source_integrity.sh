@@ -18,3 +18,24 @@ source_file_matches_manifest_hash() {
 	integrity_without_lf_hash=${integrity_without_lf_hash%% *}
 	[ "$integrity_without_lf_hash" = "$integrity_expected_hash" ]
 }
+
+source_file_ensure_web_single_lf_variant() {
+	fixture_file=$1
+	fixture_expected_hash=$2
+	fixture_relative_path=$3
+	fixture_allowlist=$4
+
+	grep -Fqx "$fixture_relative_path" "$fixture_allowlist" || return 1
+	fixture_actual_hash=$(sha256sum "$fixture_file") || return 2
+	fixture_actual_hash=${fixture_actual_hash%% *}
+	if [ "$fixture_actual_hash" = "$fixture_expected_hash" ]; then
+		printf '\n' >> "$fixture_file" || return 2
+		return 0
+	fi
+
+	source_file_matches_manifest_hash \
+		"$fixture_file" \
+		"$fixture_expected_hash" \
+		"$fixture_relative_path" \
+		"$fixture_allowlist"
+}

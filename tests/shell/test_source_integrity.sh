@@ -6,6 +6,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HELPER="$SCRIPT_DIR/source_integrity.sh"
 ALLOWLIST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.web-single-lf-paths"
+UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manifest"
 SOURCE_DIR="$REPO_ROOT/openwrt-feed/singbox-formula/src"
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/singbox-formula-integrity-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -55,14 +56,71 @@ assert_command_failure \
 	'non-allowlisted file rejects one trailing LF' \
 	source_file_matches_manifest_hash "$TEST_TMP/one-lf" "$CANONICAL_HASH" README.md "$ALLOWLIST"
 
+cp "$TEST_TMP/canonical" "$TEST_TMP/prepared-canonical"
+assert_command_success \
+	'fixture preparation converts canonical bytes to exactly one LF' \
+	source_file_ensure_web_single_lf_variant \
+	"$TEST_TMP/prepared-canonical" "$CANONICAL_HASH" .env "$ALLOWLIST"
+assert_files_equal \
+	"$TEST_TMP/one-lf" \
+	"$TEST_TMP/prepared-canonical" \
+	'fixture preparation emits the reviewed one-LF bytes'
+
+cp "$TEST_TMP/one-lf" "$TEST_TMP/prepared-one-lf"
+assert_command_success \
+	'fixture preparation accepts an existing reviewed one-LF file' \
+	source_file_ensure_web_single_lf_variant \
+	"$TEST_TMP/prepared-one-lf" "$CANONICAL_HASH" .env "$ALLOWLIST"
+assert_files_equal \
+	"$TEST_TMP/one-lf" \
+	"$TEST_TMP/prepared-one-lf" \
+	'fixture preparation is byte-idempotent for an existing one-LF file'
+
+cp "$TEST_TMP/changed" "$TEST_TMP/prepared-changed"
+assert_command_failure \
+	'fixture preparation rejects changed content' \
+	source_file_ensure_web_single_lf_variant \
+	"$TEST_TMP/prepared-changed" "$CANONICAL_HASH" .env "$ALLOWLIST"
+assert_files_equal \
+	"$TEST_TMP/changed" \
+	"$TEST_TMP/prepared-changed" \
+	'failed fixture preparation preserves changed content'
+
+cp "$TEST_TMP/canonical" "$TEST_TMP/prepared-non-allowlisted"
+assert_command_failure \
+	'fixture preparation rejects a non-allowlisted path' \
+	source_file_ensure_web_single_lf_variant \
+	"$TEST_TMP/prepared-non-allowlisted" "$CANONICAL_HASH" README.md "$ALLOWLIST"
+assert_files_equal \
+	"$TEST_TMP/canonical" \
+	"$TEST_TMP/prepared-non-allowlisted" \
+	'failed fixture preparation preserves a non-allowlisted file'
+
 WEB_SOURCE="$TEST_TMP/web-source"
 cp -a "$SOURCE_DIR" "$WEB_SOURCE"
-printf '\n' >> "$WEB_SOURCE/.env"
-printf '\n' >> "$WEB_SOURCE/.github/workflows/go-release-docker.yml"
+WEB_PREPARATION_FAILURES=
+while IFS="$(printf '\t')" read -r relative_path _ expected_hash; do
+	grep -Fqx "$relative_path" "$ALLOWLIST" || continue
+	if ! source_file_ensure_web_single_lf_variant \
+		"$WEB_SOURCE/$relative_path" \
+		"$expected_hash" \
+		"$relative_path" \
+		"$ALLOWLIST"; then
+		WEB_PREPARATION_FAILURES="$WEB_PREPARATION_FAILURES $relative_path"
+	fi
+done < "$UPSTREAM_MANIFEST"
 if SOURCE_DIR="$WEB_SOURCE" sh "$SCRIPT_DIR/test_source_package.sh" > "$TEST_TMP/package.stdout" 2> "$TEST_TMP/package.stderr"; then
+	WEB_PACKAGE_VALID=1
+else
+	WEB_PACKAGE_VALID=0
+fi
+if [ -z "$WEB_PREPARATION_FAILURES" ] && [ "$WEB_PACKAGE_VALID" -eq 1 ]; then
 	record_ok 'complete source validation accepts the two real single-LF web variants'
 else
 	record_failure 'complete source validation accepts the two real single-LF web variants'
+	if [ -n "$WEB_PREPARATION_FAILURES" ]; then
+		printf 'fixture preparation rejected:%s\n' "$WEB_PREPARATION_FAILURES" >&2
+	fi
 	cat "$TEST_TMP/package.stdout" >&2
 	cat "$TEST_TMP/package.stderr" >&2
 fi
