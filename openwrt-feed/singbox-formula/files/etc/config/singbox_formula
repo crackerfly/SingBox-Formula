@@ -1,0 +1,22 @@
+config global 'main'
+	option enabled '0'
+	# Strict bounds: boot_delay 0..600, port 1..65535,
+	# subscription_timeout 5..600, refresh_interval 1..10080.
+	option boot_delay '90'
+	option port '9716'
+	option password '890716'
+	option subscription_url ''
+	option subscription_timeout '60'
+	option refresh_interval '360'
+	option singbox_flag '1'
+	option default_template 'momo_template'
+	option cache_dir '/var/lib/singbox-formula/cache'
+	option log_file '/var/log/singbox-formula/server.log'
+	option output_config '/etc/momo/profiles/config.json'
+	option template_base_url 'http://127.0.0.1/singbox-formula/templates'
+
+config template 'momo_template'
+	option enabled '1'
+	option name 'Momo Template'
+	option file 'momo-template.json'
+	option no_node '➜ Direct'
