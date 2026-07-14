@@ -20,3 +20,8 @@ SHA256SUMS
 .DS_Store
 .idea/
 .vscode/
+.worktrees/
+
+# Local binaries produced while testing the vendored converter
+openwrt-feed/singbox-formula/src/singbox-subscribe-convert
+openwrt-feed/singbox-formula/src/sb-sub-c
