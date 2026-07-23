@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       pkg_version: ${{ steps.meta.outputs.pkg_version }}
+      should_release: ${{ steps.meta.outputs.should_release }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -69,8 +70,10 @@ jobs:
           go test -race ./...
           go vet ./...
 
-      - name: Read package version
+      - name: Read package version and decide whether to release
         id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           version="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' "openwrt-feed/${MAIN_PACKAGE}/Makefile")"
@@ -83,6 +86,21 @@ jobs:
           echo "pkg_version=${version}" >> "$GITHUB_OUTPUT"
           echo "Package version: ${version}"
 
+          # Auto-release on an ordinary push (this is how the web uploader
+          # lands changes) whenever v<version> has no release yet. Bumping
+          # PKG_VERSION is therefore the only thing needed to cut a release,
+          # and re-uploading the same version never republishes it.
+          should_release=false
+          if [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" = "${GITHUB_REF#refs/tags/}" ]; then
+            if gh release view "v${version}" >/dev/null 2>&1; then
+              echo "Release v${version} already exists - this push only runs the smoke build."
+            else
+              should_release=true
+              echo "No release for v${version} yet - this push builds every architecture and publishes."
+            fi
+          fi
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------
   # 2. Resolve point releases and validate every arch -> target mapping BEFORE
   #    spending ~43 SDK builds on it. A wrong mapping fails here in a minute.
@@ -90,7 +108,10 @@ jobs:
   prepare:
     name: Resolve matrix
     needs: test
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      needs.test.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.build_matrix.outputs.matrix }}
@@ -151,7 +172,10 @@ jobs:
   smoke:
     name: Smoke build
     needs: test
-    if: (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'pull_request'
+    if: |
+      needs.test.outputs.should_release != 'true' &&
+      ((github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) ||
+       github.event_name == 'pull_request')
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -200,7 +224,8 @@ jobs:
     if: |
       needs.build.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
-       startsWith(github.ref, 'refs/tags/v'))
+       startsWith(github.ref, 'refs/tags/v') ||
+       needs.test.outputs.should_release == 'true')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
