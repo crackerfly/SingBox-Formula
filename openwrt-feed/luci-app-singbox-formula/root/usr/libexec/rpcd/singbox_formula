@@ -12,7 +12,23 @@ INIT=${SBF_INIT_SCRIPT:-/etc/init.d/singbox-formula}
 STATE_DIR=${SBF_STATE_DIR:-/var/run/singbox-formula}
 ACTION_LOCK="$STATE_DIR/rpc-action.lock"
 ACTION_STATE="$STATE_DIR/action.state"
+ACTION_ERR="$STATE_DIR/action.err"
 ACTION_TIMEOUT=900
+
+# busybox 的 timeout applet 是可裁剪的, 并非所有固件都编入。缺失时降级为
+# 直接执行: 丢掉看门狗, 也好过整个动作以 127 退出而根本不运行。
+TIMEOUT_BIN=$(command -v timeout 2>/dev/null) || TIMEOUT_BIN=
+
+_run_with_timeout() {
+	local seconds="$1"
+	shift
+	if [ -n "$TIMEOUT_BIN" ]; then
+		"$TIMEOUT_BIN" "$seconds" "$@"
+		return $?
+	fi
+	"$@"
+}
+
 
 json_string() {
 	# Emit a JSON-safe string body. Escapes backslash, double quote, newline and
@@ -246,17 +262,30 @@ _lock_release_token() {
 
 _spawn_update() {
 	local act="$1" sub="$2" token rc worker worker_start owner_tmp n
+	# 提前拦住 exec 层面的失败, 否则用户只会看到一个不透明的 126/127。
+	if [ ! -f "$UPDATE" ]; then
+		echo "updater $UPDATE is missing"
+		return 1
+	fi
+	if [ ! -x "$UPDATE" ]; then
+		echo "updater $UPDATE is not executable"
+		return 1
+	fi
 	token=$(_lock_acquire) || { echo 'another operation is already running'; return 75; }
 	_state_write "$act" running 0 "$token" || { _lock_release_token "$token"; return 1; }
+	: > "$ACTION_ERR" 2>/dev/null || true
 	(
 		n=0
 		while [ ! -f "$ACTION_LOCK/ready" ] && [ "$n" -lt 5 ]; do sleep 1; n=$((n + 1)); done
 		[ -f "$ACTION_LOCK/ready" ] || exit 1
-		timeout "$ACTION_TIMEOUT" "$UPDATE" "$sub"
+		_run_with_timeout "$ACTION_TIMEOUT" "$UPDATE" "$sub"
 		rc=$?
 		_state_write "$act" done "$rc" "$token"
 		_lock_release_token "$token"
-	) </dev/null >/dev/null 2>/dev/null &
+	# stderr 必须落盘而不是丢弃: updater 之外的失败(exec 错误、缺少 applet)
+	# 不会进 update.log, 丢掉之后就完全无从排查。stdout 仍走 /dev/null,
+	# 因为 rpcd 要等插件的 stdout 关闭才会返回。
+	) </dev/null >/dev/null 2>"$ACTION_ERR" &
 	worker=$!
 	worker_start=$(_process_start "$worker" 2>/dev/null) || {
 		kill "$worker" 2>/dev/null || true
@@ -352,7 +381,7 @@ _converter_version() {
 	fi
 	case "$v" in *[!0-9.]*|''|.*|*.) v='' ;; esac
 	if [ -z "$v" ]; then
-		[ -x "$bin" ] && v="$(timeout 3 "$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?(-[A-Za-z0-9.]+)?' | head -n1)"
+		[ -x "$bin" ] && v="$(_run_with_timeout 3 "$bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?(-[A-Za-z0-9.]+)?' | head -n1)"
 		if [ -n "$v" ]; then
 			mkdir -p /var/lib/singbox-formula 2>/dev/null
 			printf '%s' "$v" > "$f" 2>/dev/null

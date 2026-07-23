@@ -315,8 +315,11 @@ return view.extend({
 						toast(_('Still running in the background — watch the update log below.'), true);
 					else if (st && st.action === name && st.action_state === 'stale')
 						toast(_('Operation was interrupted — see the update log below.'), true);
+					else if (st && st.action_code === 75)
+						toast(_('Another update is already running, or a stale lock is left in /var/run/singbox-formula/. Check the update log below.'), true);
 					else
-						toast(_('Operation failed — see the update log below for details.'), true);
+						toast(_('Operation failed (exit %d) — see the update log below for details.').format(
+							(st && typeof st.action_code === 'number') ? st.action_code : -1), true);
 					return self.reloadStatus();
 				});
 			}
