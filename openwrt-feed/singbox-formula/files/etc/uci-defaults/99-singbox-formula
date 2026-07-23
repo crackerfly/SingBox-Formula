@@ -1,0 +1,58 @@
+#!/bin/sh
+
+mkdir -p /etc/singbox-formula /var/lib/singbox-formula/cache /var/log/singbox-formula /www/singbox-formula/templates
+
+changed=0
+
+set_if_missing() {
+	key=$1
+	value=$2
+	if ! uci -q get "$key" >/dev/null 2>&1; then
+		uci set "$key=$value" || return 1
+		changed=1
+	fi
+}
+
+# Upgrade migrations are additive. An existing value, including an explicitly
+# empty string or a value that matched an older package default, is a user choice.
+set_if_missing singbox_formula.main global || exit 1
+set_if_missing singbox_formula.main.enabled 0 || exit 1
+set_if_missing singbox_formula.main.boot_delay 90 || exit 1
+set_if_missing singbox_formula.main.port 9716 || exit 1
+set_if_missing singbox_formula.main.password 890716 || exit 1
+set_if_missing singbox_formula.main.subscription_url '' || exit 1
+set_if_missing singbox_formula.main.user_agent 'sing-box 1.11.0' || exit 1
+set_if_missing singbox_formula.main.subscription_timeout 60 || exit 1
+set_if_missing singbox_formula.main.refresh_interval 360 || exit 1
+set_if_missing singbox_formula.main.default_template momo_template || exit 1
+set_if_missing singbox_formula.main.cache_dir /var/lib/singbox-formula/cache || exit 1
+set_if_missing singbox_formula.main.log_file /var/log/singbox-formula/server.log || exit 1
+set_if_missing singbox_formula.main.output_config /etc/momo/profiles/config.json || exit 1
+set_if_missing singbox_formula.main.template_base_url http://127.0.0.1/singbox-formula/templates || exit 1
+
+set_if_missing singbox_formula.momo_template template || exit 1
+set_if_missing singbox_formula.momo_template.enabled 1 || exit 1
+set_if_missing singbox_formula.momo_template.name 'Momo Template' || exit 1
+set_if_missing singbox_formula.momo_template.file momo-template.json || exit 1
+set_if_missing singbox_formula.momo_template.no_node '➜ Direct' || exit 1
+
+# 迁移: 移除 singbox_flag。实测支持 flag=singbox 的服务商很少，
+# 需要该参数的用户直接把它写进订阅 URL 即可。
+if uci -q get singbox_formula.main.singbox_flag >/dev/null 2>&1; then
+	uci -q delete singbox_formula.main.singbox_flag || exit 1
+	changed=1
+fi
+
+if [ "$changed" = "1" ]; then
+	uci commit singbox_formula || exit 1
+fi
+
+if [ -x /etc/init.d/singbox-formula ]; then
+	/etc/init.d/singbox-formula enable >/dev/null 2>&1 || exit 1
+fi
+
+if [ -x /usr/share/singbox-formula/generate-config.sh ]; then
+	/usr/share/singbox-formula/generate-config.sh >/dev/null 2>&1 || exit 1
+fi
+
+exit 0
