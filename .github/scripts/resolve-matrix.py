@@ -51,8 +51,14 @@ def fetch(url, retries=3):
 def latest_point_release(major):
     """Pick the highest x.y.z published under the given x.y major version."""
     body = fetch(RELEASES_INDEX)
-    pattern = re.compile(r"\b" + re.escape(major) + r"\.(\d+)\b")
-    found = sorted({int(m.group(1)) for m in pattern.finditer(body)})
+    # Match only plain x.y.z directory entries. The index also carries
+    # 25.12-SNAPSHOT/, packages-25.12/ and release candidates such as
+    # 25.12.6-rc1/; a bare \b would happily read "6" out of the rc entry and
+    # then request a release directory that does not exist.
+    pattern = re.compile(
+        r'(?:href=")?(' + re.escape(major) + r"\.(\d+))/"
+    )
+    found = sorted({int(m.group(2)) for m in pattern.finditer(body)})
     if not found:
         raise SystemExit(
             f"no published point release found for OpenWrt {major}; "
