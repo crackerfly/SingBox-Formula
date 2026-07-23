@@ -1,0 +1,270 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish a GitHub release when the matrix succeeds"
+        type: boolean
+        required: false
+        default: true
+      tag:
+        description: "Release tag (blank = v<PKG_VERSION> read from the Makefile)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  MAIN_PACKAGE: singbox-formula
+  LUCI_PACKAGE: luci-app-singbox-formula
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Source / shell / Go tests. Cheap, runs on every trigger, gates the rest.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    outputs:
+      pkg_version: ${{ steps.meta.outputs.pkg_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Restore executable modes after web upload
+        run: sh .github/scripts/restore-executable-modes.sh "$GITHUB_WORKSPACE"
+
+      - name: Set up pinned Go toolchain for tests
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+          cache-dependency-path: openwrt-feed/singbox-formula/src/go.sum
+
+      - name: Run source, shell, and converter tests
+        run: |
+          set -eux
+          for test_script in tests/shell/test_*.sh; do
+            sh "${test_script}"
+          done
+          node --check openwrt-feed/luci-app-singbox-formula/root/www/luci-static/resources/view/singbox-formula/overview.js
+          node --check openwrt-feed/luci-app-singbox-formula/root/www/luci-static/resources/view/singbox-formula/templates.js
+          sh -n openwrt-feed/luci-app-singbox-formula/root/usr/libexec/rpcd/singbox_formula
+          cd openwrt-feed/singbox-formula/src
+          go test -race ./...
+          go vet ./...
+
+      - name: Read package version
+        id: meta
+        run: |
+          set -eu
+          version="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' "openwrt-feed/${MAIN_PACKAGE}/Makefile")"
+          luci_version="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' "openwrt-feed/${LUCI_PACKAGE}/Makefile")"
+          test -n "${version}"
+          if [ "${version}" != "${luci_version}" ]; then
+            echo "PKG_VERSION mismatch: ${MAIN_PACKAGE}=${version} ${LUCI_PACKAGE}=${luci_version}" >&2
+            exit 1
+          fi
+          echo "pkg_version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Package version: ${version}"
+
+  # ---------------------------------------------------------------------------
+  # 2. Resolve point releases and validate every arch -> target mapping BEFORE
+  #    spending ~43 SDK builds on it. A wrong mapping fails here in a minute.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve matrix
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve versions and verify SDK targets
+        id: build_matrix
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/resolve-matrix.py \
+            --matrix .github/arch-matrix.json \
+            --output matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # 3. Full architecture matrix. Only for dispatch / tag pushes.
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.entry.openwrt_version }} ${{ matrix.entry.arch }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        entry: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Restore executable modes after web upload
+        run: sh .github/scripts/restore-executable-modes.sh "$GITHUB_WORKSPACE"
+
+      - name: Build package
+        uses: ./.github/actions/build-package
+        with:
+          openwrt_version: ${{ matrix.entry.openwrt_version }}
+          openwrt_target: ${{ matrix.entry.target }}
+          arch: ${{ matrix.entry.arch }}
+          collect_luci: ${{ matrix.entry.collect_luci }}
+          main_package: ${{ env.MAIN_PACKAGE }}
+          luci_package: ${{ env.LUCI_PACKAGE }}
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: pkg-${{ matrix.entry.openwrt_version }}-${{ matrix.entry.arch }}
+          path: output_pkg/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4. Smoke build for ordinary pushes / PRs: one target, no release. Keeps the
+  #    package build honest without queueing 43 jobs on every commit.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Smoke build
+    needs: test
+    if: (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Restore executable modes after web upload
+        run: sh .github/scripts/restore-executable-modes.sh "$GITHUB_WORKSPACE"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/resolve-matrix.py \
+            --matrix .github/arch-matrix.json \
+            --only-version 25.12 \
+            --only-arch aarch64_cortex-a53 \
+            --output smoke.json
+          version="$(python3 -c 'import json;print(json.load(open("smoke.json"))[0]["openwrt_version"])')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        uses: ./.github/actions/build-package
+        with:
+          openwrt_version: ${{ steps.ver.outputs.version }}
+          openwrt_target: mediatek/mt7622
+          arch: aarch64_cortex-a53
+          collect_luci: "true"
+          main_package: ${{ env.MAIN_PACKAGE }}
+          luci_package: ${{ env.LUCI_PACKAGE }}
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: smoke-aarch64_cortex-a53
+          path: output_pkg/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 5. Collect every artifact and publish a GitHub release tagged with the
+  #    package version.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [test, build]
+    if: |
+      needs.build.result == 'success' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+       startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: pkg-*
+          path: artifacts
+
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 .github/scripts/collect-release-assets.py \
+            --input artifacts --output dist \
+            --main "${MAIN_PACKAGE}" --luci "${LUCI_PACKAGE}"
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          ls -l dist
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          PKG_VERSION: ${{ needs.test.outputs.pkg_version }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/}" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="v${PKG_VERSION}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${tag}"
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PKG_VERSION: ${{ needs.test.outputs.pkg_version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "SingBox Formula ${PKG_VERSION}"
+            echo
+            echo "Builds for OpenWrt 24.10 and 25.12."
+            echo
+            echo "- \`singbox-formula_<arch>_openwrt-<version>\` — the service plus the"
+            echo "  vendored \`sb-sub-c\` converter, one file per CPU architecture."
+            echo "- \`luci-app-singbox-formula_all_openwrt-<version>\` — the web UI. It is"
+            echo "  architecture independent (\`PKGARCH:=all\`), so one file per OpenWrt"
+            echo "  release covers every device."
+            echo
+            echo "Install the service package first, then the LuCI app."
+            echo "Checksums are in \`SHA256SUMS\`."
+          } > NOTES.md
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — uploading assets."
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" dist/* \
+              --title "${TAG}" \
+              --notes-file NOTES.md
+          fi
