@@ -1,0 +1,2 @@
+.env
+.github/workflows/go-release-docker.yml

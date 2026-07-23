@@ -1,0 +1,689 @@
+{
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "output": "",
+    "timestamp": true
+  },
+  "dns": {
+    "strategy": "prefer_ipv4",
+    "servers": [
+      {
+        "tag": "google-dns",
+        "type": "udp",
+        "server": "127.0.0.1",
+        "server_port": 6553
+      },
+      {
+        "tag": "direct-dns",
+        "type": "udp",
+        "server": "127.0.0.1",
+        "server_port": 53
+      },
+      {
+        "tag": "fakeip-dns",
+        "type": "fakeip",
+        "inet4_range": "100.127.0.0/16",
+        "inet6_range": "2001:2::/48"
+      }
+    ],
+    "rules": [
+      {
+        "clash_mode": "Direct",
+        "server": "direct-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "clash_mode": "Global",
+        "server": "fakeip-dns",
+        "action": "route"
+      },
+      {
+        "inbound": [
+          "dns-in-fakeip"
+        ],
+        "server": "fakeip-dns"
+      },
+      {
+        "rule_set": [
+          "CN-CDN-r0-0",
+          "CN-CDN-r0-1",
+          "CN-CDN-r0-2"
+        ],
+        "server": "direct-dns",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Youtube-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Telegram-r0-0",
+          "Telegram-r0-1"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Spotify-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Netflix-r0-0",
+          "Netflix-r0-1"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "AI-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Github-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Google-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Steam-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "CN-r0-0",
+          "CN-r0-1"
+        ],
+        "server": "direct-dns",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "!CN-r0-0"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      },
+      {
+        "ip_is_private": true,
+        "server": "direct-dns"
+      },
+      {
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "fakeip-dns",
+        "rewrite_ttl": 1,
+        "action": "route"
+      }
+    ],
+    "final": "google-dns",
+    "independent_cache": true
+  },
+  "inbounds": [
+    {
+      "listen": "::",
+      "listen_port": 8888,
+      "type": "mixed",
+      "tag": "mixed-in"
+    },
+    {
+      "listen": "::",
+      "listen_port": 9888,
+      "type": "tproxy",
+      "tag": "tproxy-in",
+      "tcp_fast_open": true,
+      "udp_fragment": true,
+      "udp_timeout": "5s"
+    },
+    {
+      "listen": "::",
+      "listen_port": 5354,
+      "type": "direct",
+      "tag": "dns-in"
+    },
+    {
+      "listen": "::",
+      "listen_port": 5355,
+      "type": "direct",
+      "tag": "dns-in-fakeip"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "Proxy",
+      "type": "selector",
+      "outbounds": [
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Youtube",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Telegram",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Spotify",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Netflix",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "AI",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Github",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Google",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "Steam",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "!CN",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "🇭🇰 香港",
+        "🇸🇬 新加坡",
+        "🇺🇸 美国",
+        "🇯🇵 日本",
+        "🇰🇷 韩国",
+        "☁️ 全部",
+        "机场",
+        "➜ Direct"
+      ]
+    },
+    {
+      "tag": "🇭🇰 香港",
+      "type": "selector",
+      "outbounds": [
+        {{ "香港|HK|Hong Kong|Hongkong|HKG|🇭🇰" | NotesName }}
+      ]
+    },
+    {
+      "tag": "🇸🇬 新加坡",
+      "type": "urltest",
+      "outbounds": [
+        {{ "新加坡|Singapore|SG|Singa|🇸🇬|AWS新加坡" | NotesName }}
+      ],
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "tag": "🇺🇸 美国",
+      "type": "urltest",
+      "outbounds": [
+        {{ "美国|US|USA|United States|America|洛杉矶|圣何塞|阿什本|🇺🇸" | NotesName }}
+      ],
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "tag": "🇯🇵 日本",
+      "type": "urltest",
+      "outbounds": [
+        {{ "日本|JP|Japan|Tokyo|东京|大阪|🇯🇵" | NotesName }}
+      ],
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "tag": "🇰🇷 韩国",
+      "type": "urltest",
+      "outbounds": [
+        {{ "韩国|KR|Korea|首尔|Seoul|🇰🇷" | NotesName }}
+      ],
+      "url": "https://www.gstatic.com/generate_204"
+    },
+    {
+      "tag": "☁️ 全部",
+      "type": "selector",
+      "outbounds": [
+        {{ "" | NotesName }}
+      ]
+    },
+    {
+      "tag": "机场",
+      "type": "selector",
+      "outbounds": [
+        {{ "" | NotesName }}
+      ]
+    },
+    {{ Nodes }},
+    {
+      "tag": "➜ Direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "rule_set": [
+      {
+        "type": "remote",
+        "format": "source",
+        "download_detour": "➜ Direct",
+        "tag": "CN-CDN-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/apple@cn.json"
+      },
+      {
+        "type": "remote",
+        "format": "source",
+        "download_detour": "➜ Direct",
+        "tag": "CN-CDN-r0-1",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/steam@cn.json"
+      },
+      {
+        "type": "remote",
+        "format": "source",
+        "download_detour": "➜ Direct",
+        "tag": "CN-CDN-r0-2",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/microsoft@cn.json"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Youtube-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/youtube.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Telegram-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geoip/telegram.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Telegram-r0-1",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/telegram.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Spotify-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/spotify.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Netflix-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geoip/netflix.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Netflix-r0-1",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/netflix.srs"
+      },
+      {
+        "type": "remote",
+        "format": "source",
+        "download_detour": "➜ Direct",
+        "tag": "AI-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/sing/geo/geosite/category-ai-!cn.json"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Github-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/github.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Google-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/google.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "Steam-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/steam.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "CN-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geoip/cn.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "CN-r0-1",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/sing/geo/geosite/cn.srs"
+      },
+      {
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "➜ Direct",
+        "tag": "!CN-r0-0",
+        "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/geolocation-!cn.srs"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff",
+        "sniffer": [
+          "dns",
+          "http",
+          "tls",
+          "quic"
+        ],
+        "timeout": "500ms"
+      },
+      {
+        "action": "reject",
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "port": [
+              853
+            ]
+          },
+          {
+            "network": [
+              "udp"
+            ],
+            "port": [
+              443
+            ]
+          },
+          {
+            "protocol": [
+              "stun"
+            ]
+          }
+        ]
+      },
+      {
+        "inbound": [
+          "dns-in",
+          "dns-in-fakeip"
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "clash_mode": "Direct",
+        "outbound": "➜ Direct",
+        "action": "route"
+      },
+      {
+        "clash_mode": "Global",
+        "outbound": "Proxy",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "CN-CDN-r0-0",
+          "CN-CDN-r0-1",
+          "CN-CDN-r0-2"
+        ],
+        "outbound": "➜ Direct",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Youtube-r0-0"
+        ],
+        "outbound": "Youtube",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Telegram-r0-1"
+        ],
+        "outbound": "Telegram",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Spotify-r0-0"
+        ],
+        "outbound": "Spotify",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Netflix-r0-1"
+        ],
+        "outbound": "Netflix",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "AI-r0-0"
+        ],
+        "outbound": "AI",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Github-r0-0"
+        ],
+        "outbound": "Github",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Google-r0-0"
+        ],
+        "outbound": "Google",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Steam-r0-0"
+        ],
+        "outbound": "Steam",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "CN-r0-1"
+        ],
+        "outbound": "➜ Direct",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "!CN-r0-0"
+        ],
+        "outbound": "!CN",
+        "action": "route"
+      },
+      {
+        "action": "resolve"
+      },
+      {
+        "rule_set": [
+          "Telegram-r0-0"
+        ],
+        "outbound": "Telegram",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "Netflix-r0-0"
+        ],
+        "outbound": "Netflix",
+        "action": "route"
+      },
+      {
+        "rule_set": [
+          "CN-r0-0"
+        ],
+        "outbound": "➜ Direct",
+        "action": "route"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "➜ Direct",
+        "action": "route"
+      }
+    ],
+    "auto_detect_interface": true,
+    "final": "Proxy",
+    "default_domain_resolver": {
+      "server": "direct-dns"
+    }
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_fakeip": true
+    },
+    "clash_api": {
+      "external_controller": "0.0.0.0:9090",
+      "external_ui": "zashboard",
+      "external_ui_download_detour": "➜ Direct",
+      "external_ui_download_url": "https://cdn.gh-proxy.org/https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+    }
+  }
+}
