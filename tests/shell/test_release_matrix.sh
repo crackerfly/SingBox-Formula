@@ -77,19 +77,19 @@ assert_command_success "release collector compiles" python3 -m py_compile "$COLL
 # The collector must reject a release that lost its LuCI package, otherwise a
 # partial matrix would publish an unusable release.
 mkdir -p "$TEST_TMP/arts/pkg-a" "$TEST_TMP/good/pkg-a"
-printf 'main\n' > "$TEST_TMP/arts/pkg-a/singbox-formula_x86_64_openwrt-25.12.apk"
+printf 'main\n' > "$TEST_TMP/arts/pkg-a/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk"
 assert_command_failure "collector rejects a release with no LuCI package" \
 	python3 "$COLLECT" --input "$TEST_TMP/arts" --output "$TEST_TMP/out" \
 	--main singbox-formula --luci luci-app-singbox-formula
 
-printf 'main\n' > "$TEST_TMP/good/pkg-a/singbox-formula_x86_64_openwrt-25.12.apk"
-printf 'luci\n' > "$TEST_TMP/good/pkg-a/luci-app-singbox-formula_all_openwrt-25.12.apk"
+printf 'main\n' > "$TEST_TMP/good/pkg-a/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk"
+printf 'luci\n' > "$TEST_TMP/good/pkg-a/luci-app-singbox-formula_1.6.4_all_openwrt-25.12.apk"
 printf 'info\n' > "$TEST_TMP/good/pkg-a/BUILD_INFO_x86_64.txt"
 assert_command_success "collector accepts a complete release set" \
 	python3 "$COLLECT" --input "$TEST_TMP/good" --output "$TEST_TMP/goodout" \
 	--main singbox-formula --luci luci-app-singbox-formula
-assert_file_exists "$TEST_TMP/goodout/singbox-formula_x86_64_openwrt-25.12.apk" "collector copies the service package"
-assert_file_exists "$TEST_TMP/goodout/luci-app-singbox-formula_all_openwrt-25.12.apk" "collector copies the LuCI package"
+assert_file_exists "$TEST_TMP/goodout/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk" "collector copies the service package"
+assert_file_exists "$TEST_TMP/goodout/luci-app-singbox-formula_1.6.4_all_openwrt-25.12.apk" "collector copies the LuCI package"
 assert_file_not_exists "$TEST_TMP/goodout/BUILD_INFO_x86_64.txt" "collector leaves per-job build info out of the release"
 
 # --- workflow wiring ----------------------------------------------------------
@@ -115,5 +115,15 @@ assert_contains "$BUILD_ACTION" 'loongarch64_\*\)' "build action verifies loonga
 assert_contains "$BUILD_ACTION" 'riscv64_\*\)' "build action verifies riscv binaries"
 assert_contains "$BUILD_ACTION" 'mipsel_\*\)' "build action distinguishes little endian mips"
 assert_contains "$BUILD_ACTION" 'for ext in apk ipk' "build action accepts both apk and ipk output"
+
+# Release assets must be self-identifying once downloaded.
+assert_contains "$BUILD_ACTION" 'PKG_VERSION.*sed -n' "build action reads the package version from the Makefile"
+assert_contains "$BUILD_ACTION" '\$\{MAIN_PACKAGE\}_\$\{PKG_VERSION\}_\$\{ARCH\}' "service package filename carries version and architecture"
+assert_contains "$BUILD_ACTION" '\$\{LUCI_PACKAGE\}_\$\{PKG_VERSION\}_all' "LuCI package filename carries the version"
+
+# Bumping PKG_VERSION on a normal push is what cuts a release, because the web
+# uploader can only produce pushes.
+assert_contains "$WORKFLOW" 'should_release' "workflow decides releases from the package version"
+assert_contains "$WORKFLOW" 'gh release view' "workflow does not republish an existing version"
 
 finish_tests
