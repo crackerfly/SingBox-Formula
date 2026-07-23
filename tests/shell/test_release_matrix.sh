@@ -94,6 +94,15 @@ assert_file_not_exists "$TEST_TMP/goodout/BUILD_INFO_x86_64.txt" "collector leav
 
 # --- workflow wiring ----------------------------------------------------------
 
+# GitHub runs an explicit `shell: bash` with `-eo pipefail`, so a producer piped
+# into an early-exiting consumer (head, grep -q) dies on SIGPIPE and fails the
+# step. This bit the SDK extraction once; keep it from coming back.
+LINT="$REPO_ROOT/.github/scripts/lint-workflow-pipes.py"
+assert_file_exists "$LINT" "pipefail hazard linter exists"
+assert_command_success "workflow shell blocks have no pipefail hazards" \
+	python3 "$LINT" "$WORKFLOW" "$BUILD_ACTION"
+
+
 assert_contains "$WORKFLOW" 'resolve-matrix\.py' "workflow resolves the matrix through the helper"
 assert_contains "$WORKFLOW" 'collect-release-assets\.py' "workflow assembles release assets through the helper"
 assert_contains "$WORKFLOW" 'fail-fast: false' "one failing architecture does not cancel the others"
