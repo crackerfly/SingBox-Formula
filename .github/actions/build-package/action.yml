@@ -186,6 +186,12 @@ runs:
         # OpenWrt 24.10 ships opkg (.ipk); 25.12 ships apk (.apk). Accept both
         # and keep whichever extension this release actually produced.
         MAJOR="$(printf '%s' "${OPENWRT_VERSION}" | cut -d. -f1,2)"
+        PKG_VERSION="$(sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p' "openwrt-feed/${MAIN_PACKAGE}/Makefile")"
+        if [ -z "${PKG_VERSION}" ]; then
+          echo "could not read PKG_VERSION from the package Makefile" >&2
+          exit 1
+        fi
+        echo "Package version: ${PKG_VERSION}"
 
         copy_one() {
           name="$1"; label="$2"
@@ -205,15 +211,16 @@ runs:
           fi
         }
 
-        copy_one "${MAIN_PACKAGE}" "${MAIN_PACKAGE}_${ARCH}_openwrt-${MAJOR}"
+        copy_one "${MAIN_PACKAGE}" "${MAIN_PACKAGE}_${PKG_VERSION}_${ARCH}_openwrt-${MAJOR}"
         if [ "${COLLECT_LUCI}" = "true" ]; then
-          copy_one "${LUCI_PACKAGE}" "${LUCI_PACKAGE}_all_openwrt-${MAJOR}"
+          copy_one "${LUCI_PACKAGE}" "${LUCI_PACKAGE}_${PKG_VERSION}_all_openwrt-${MAJOR}"
         fi
 
         {
           echo "OpenWrt version: ${OPENWRT_VERSION}"
           echo "OpenWrt target:  ${OPENWRT_TARGET}"
           echo "Architecture:    ${ARCH}"
+          echo "Package version: ${PKG_VERSION}"
           echo "Git ref:         ${GITHUB_REF}"
           echo "Git SHA:         ${GITHUB_SHA}"
           echo "Built at:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
