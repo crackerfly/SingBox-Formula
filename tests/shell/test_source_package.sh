@@ -179,8 +179,8 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.6\.4[[:space:]]*$' \
-	"sets package version 1.6.4 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.6\.7[[:space:]]*$' \
+	"sets package version 1.6.7 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \

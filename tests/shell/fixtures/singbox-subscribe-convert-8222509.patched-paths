@@ -9,3 +9,4 @@ internal/fetcher/fetcher.go
 internal/handler/handler.go
 internal/watcher/watcher.go
 pkg/logger/logger.go
+pkg/util/password.go

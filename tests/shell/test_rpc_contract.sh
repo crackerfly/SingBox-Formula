@@ -49,6 +49,39 @@ assert_contains "$OVERVIEW" "_\('Converter URL \(LAN\)'\)" 'integration exposes 
 assert_contains "$RPC" 'lan_url' 'status exposes a LAN converter URL'
 assert_contains "$RPC" '_valid_ipv4' 'status validates the LAN address before publishing it'
 
+# busybox 的 timeout applet 是可裁剪的。缺了它, worker 会以 127 退出而
+# updater 根本不运行 —— 没有任何日志, 界面只报一个不透明的失败。
+assert_contains "$RPC" '_run_with_timeout' "background work goes through the timeout wrapper"
+assert_contains "$RPC" 'command -v timeout' "rpcd detects whether the timeout applet exists"
+assert_not_contains "$RPC" '^[[:space:]]*timeout "\$ACTION_TIMEOUT"' "rpcd never calls the timeout applet unconditionally"
+assert_contains "$RPC" 'is not executable' "rpcd rejects a non executable updater with a readable message"
+assert_contains "$RPC" '2>"\$ACTION_ERR"' "worker stderr is kept instead of discarded"
+
+# 行为验证: 在没有 timeout 的 PATH 下, 动作必须真的执行完并以 0 结束。
+NOTIMEOUT="$TMP/nobin"
+mkdir -p "$NOTIMEOUT"
+for tool in sh dash mktemp cat rm mkdir rmdir mv chmod date od tr awk sed grep head ls sleep kill wc cut find readlink dirname basename uci; do
+	tool_path=$(command -v "$tool" 2>/dev/null) && ln -sf "$tool_path" "$NOTIMEOUT/$tool"
+done
+if [ -e "$NOTIMEOUT/timeout" ]; then
+	record_failure "test fixture PATH really has no timeout applet"
+else
+	record_ok "test fixture PATH really has no timeout applet"
+fi
+rm -rf "$TMP/state2" "$TMP/runs2"
+mkdir -p "$TMP/state2"
+PATH="$NOTIMEOUT" \
+SBF_FUNCTIONS_SH="$TMP/functions.sh" \
+SBF_UPDATER="$TMP/updater" \
+SBF_STATE_DIR="$TMP/state2" \
+SBF_TEST_RUNS="$TMP/runs2" \
+SBF_PROCESS_START_HELPER="$TMP/process-start" \
+	"$RPC" call refresh </dev/null > "$TMP/notimeout.out" 2>&1
+assert_contains "$TMP/notimeout.out" '"code":0,"output":"queued"' "dispatch succeeds without the timeout applet"
+n=0
+while [ ! -f "$TMP/runs2" ] && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
+assert_file_exists "$TMP/runs2" "updater actually runs when the timeout applet is missing"
+
 mkdir "$TMP/responses"
 i=1
 while [ "$i" -le 20 ]; do

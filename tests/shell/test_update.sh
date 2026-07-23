@@ -316,6 +316,11 @@ read -r live_owner_pid live_owner_start < "$live_owner_info"
 printf '%s %s %s\n' "$live_owner_pid" "$live_owner_start" live-owner > "$LOCK_DIR/owner"
 expect_update_failure generate "a live lock owner makes the updater busy"
 assert_equal 0 "$(event_count '^generator$')" "busy updater performs no generator side effect"
+# A busy lock is by far the most common failure, and it happens before any
+# command-specific work. It must still reach the update log, otherwise the UI
+# points the user at a file that was never created.
+assert_contains "$LOG_FILE" 'another update operation is already running' "logs a busy lock instead of failing silently"
+assert_file_exists "$LOG_FILE" "creates the update log even when locking fails"
 kill "$live_owner_job" 2>/dev/null || true
 wait "$live_owner_job" 2>/dev/null || true
 rm -rf "$LOCK_DIR"

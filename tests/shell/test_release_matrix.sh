@@ -69,6 +69,14 @@ assert_contains "$MATRIX" 'riscv64_riscv64' "keeps the 24.10 riscv64 architectur
 assert_contains "$MATRIX" 'riscv64_generic' "keeps the 25.12 riscv64 architecture name"
 assert_contains "$MATRIX" 'loongarch64_generic' "covers loongarch64 on 25.12"
 
+# OpenWrt 24.10 ships Go 1.23.x while 25.12 ships 1.26. A go.mod that demands
+# more than the oldest supported release provides fails every 24.10 job in the
+# matrix at compile time, which is expensive to discover.
+GOMOD="$REPO_ROOT/openwrt-feed/singbox-formula/src/go.mod"
+assert_file_exists "$GOMOD" "converter go.mod exists"
+assert_contains "$GOMOD" '^go 1\.(1[0-9]|2[0-3])(\.|$)' "go.mod stays within OpenWrt 24.10's Go toolchain"
+assert_contains "$WORKFLOW" "go-version: '1\.23" "CI builds against the oldest supported Go before the matrix runs"
+
 # --- helper scripts compile and behave ---------------------------------------
 
 assert_command_success "matrix resolver compiles" python3 -m py_compile "$RESOLVE"
@@ -77,19 +85,19 @@ assert_command_success "release collector compiles" python3 -m py_compile "$COLL
 # The collector must reject a release that lost its LuCI package, otherwise a
 # partial matrix would publish an unusable release.
 mkdir -p "$TEST_TMP/arts/pkg-a" "$TEST_TMP/good/pkg-a"
-printf 'main\n' > "$TEST_TMP/arts/pkg-a/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk"
+printf 'main\n' > "$TEST_TMP/arts/pkg-a/singbox-formula_1.6.7_x86_64_openwrt-25.12.apk"
 assert_command_failure "collector rejects a release with no LuCI package" \
 	python3 "$COLLECT" --input "$TEST_TMP/arts" --output "$TEST_TMP/out" \
 	--main singbox-formula --luci luci-app-singbox-formula
 
-printf 'main\n' > "$TEST_TMP/good/pkg-a/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk"
-printf 'luci\n' > "$TEST_TMP/good/pkg-a/luci-app-singbox-formula_1.6.4_all_openwrt-25.12.apk"
+printf 'main\n' > "$TEST_TMP/good/pkg-a/singbox-formula_1.6.7_x86_64_openwrt-25.12.apk"
+printf 'luci\n' > "$TEST_TMP/good/pkg-a/luci-app-singbox-formula_1.6.7_all_openwrt-25.12.apk"
 printf 'info\n' > "$TEST_TMP/good/pkg-a/BUILD_INFO_x86_64.txt"
 assert_command_success "collector accepts a complete release set" \
 	python3 "$COLLECT" --input "$TEST_TMP/good" --output "$TEST_TMP/goodout" \
 	--main singbox-formula --luci luci-app-singbox-formula
-assert_file_exists "$TEST_TMP/goodout/singbox-formula_1.6.4_x86_64_openwrt-25.12.apk" "collector copies the service package"
-assert_file_exists "$TEST_TMP/goodout/luci-app-singbox-formula_1.6.4_all_openwrt-25.12.apk" "collector copies the LuCI package"
+assert_file_exists "$TEST_TMP/goodout/singbox-formula_1.6.7_x86_64_openwrt-25.12.apk" "collector copies the service package"
+assert_file_exists "$TEST_TMP/goodout/luci-app-singbox-formula_1.6.7_all_openwrt-25.12.apk" "collector copies the LuCI package"
 assert_file_not_exists "$TEST_TMP/goodout/BUILD_INFO_x86_64.txt" "collector leaves per-job build info out of the release"
 
 # --- workflow wiring ----------------------------------------------------------
