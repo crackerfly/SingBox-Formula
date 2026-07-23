@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI app for SingBox Formula
-PKG_VERSION:=1.6.3
+PKG_VERSION:=1.6.4
 PKG_RELEASE:=1
 LUCI_DEPENDS:=+singbox-formula +luci-base +rpcd
 LUCI_PKGARCH:=all
