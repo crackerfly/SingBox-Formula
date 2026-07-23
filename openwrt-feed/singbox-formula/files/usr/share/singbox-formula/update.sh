@@ -25,8 +25,14 @@ LOCK_TOKEN=
 LOCK_PID=
 LOCK_START=
 
+LOG_READY=0
+
+# 这些错误在 rpcd 后台执行时 stderr 会被丢弃, 所以日志一就绪就同时落盘,
+# 否则界面提示“见 update log”而那个文件根本不存在。
 plain_error() {
 	printf 'update: %s\n' "$*" >&2
+	[ "$LOG_READY" = 1 ] || return 0
+	printf '%s update: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true
 }
 
 [ -r "$FUNCTIONS_SH" ] || {
@@ -211,7 +217,8 @@ prepare_log() {
 	mkdir -p "$directory" || return 1
 	[ ! -L "$LOG" ] || return 1
 	: >> "$LOG" || return 1
-	chmod 0600 "$LOG"
+	chmod 0600 "$LOG" || return 1
+	LOG_READY=1
 }
 
 rotate_log_for() {
@@ -469,6 +476,12 @@ case "$cmd" in
 		;;
 esac
 
+# prepare_log 必须排在 acquire_lock 前面: 抢锁失败是最常见的失败原因,
+# 而它只有 plain_error 一条出路。日志没就绪的话这些消息会彻底消失。
+prepare_log || {
+	plain_error "cannot prepare $LOG"
+	exit 1
+}
 acquire_lock || exit $?
 mkdir -p "$TMP_ROOT" || {
 	plain_error "cannot create temporary root $TMP_ROOT"
@@ -476,10 +489,6 @@ mkdir -p "$TMP_ROOT" || {
 }
 WORK_DIR=$(mktemp -d "$TMP_ROOT/singbox-formula-update.XXXXXX") || {
 	plain_error "cannot create updater working directory"
-	exit 1
-}
-prepare_log || {
-	plain_error "cannot prepare $LOG"
 	exit 1
 }
 load_cfg || exit 1

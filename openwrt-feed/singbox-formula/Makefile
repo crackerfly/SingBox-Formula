@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=singbox-formula
-PKG_VERSION:=1.6.4
+PKG_VERSION:=1.6.7
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0 GPL-3.0-or-later MIT
 PKG_LICENSE_FILES:=LICENSE LICENSES/GPL-3.0-or-later.txt LICENSES/MIT-lumberjack.txt
