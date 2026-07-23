@@ -1,0 +1,11 @@
+cmd/run.go
+cmd/run_server.go
+config/config.yaml
+global/config.go
+global/version.go
+go.mod
+go.sum
+internal/fetcher/fetcher.go
+internal/handler/handler.go
+internal/watcher/watcher.go
+pkg/logger/logger.go
