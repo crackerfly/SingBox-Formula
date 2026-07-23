@@ -29,6 +29,7 @@ runs:
       shell: bash
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         sudo apt-get update
         sudo apt-get install -y \
           build-essential clang flex bison g++ gawk \
@@ -44,6 +45,7 @@ runs:
         OPENWRT_TARGET: ${{ inputs.openwrt_target }}
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
 
         BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}"
         echo "SDK base URL: ${BASE_URL}"
@@ -65,10 +67,22 @@ runs:
         ' sha256sums > sha256sums.sdk
         sha256sum -c sha256sums.sdk
 
-        SDK_DIR="$(tar -tf "${SDK_FILE}" | head -n 1 | cut -d/ -f1)"
-        test -n "${SDK_DIR}"
-        tar -xf "${SDK_FILE}"
+        # Do not pipe `tar -tf` into `head`: head exits after the first line, tar
+        # takes SIGPIPE, and this step runs under `bash -eo pipefail` (which is
+        # what GitHub uses for an explicit `shell: bash`), so the whole step dies
+        # with tar's exit 2. Extract into a scratch directory and read the name
+        # back from the filesystem instead.
+        mkdir -p sdk-extract
+        tar -C sdk-extract -xf "${SDK_FILE}"
+        set -- sdk-extract/*/
+        SDK_DIR="${1%/}"
+        if [ ! -d "${SDK_DIR}" ]; then
+          echo "SDK archive did not contain a single top-level directory" >&2
+          ls -la sdk-extract >&2
+          exit 1
+        fi
         mv "${SDK_DIR}" openwrt-sdk
+        rmdir sdk-extract
 
     - name: Copy package sources into SDK
       shell: bash
@@ -77,6 +91,7 @@ runs:
         LUCI_PACKAGE: ${{ inputs.luci_package }}
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         mkdir -p openwrt-sdk/package/custom
         cp -a "openwrt-feed/${MAIN_PACKAGE}" "openwrt-sdk/package/custom/${MAIN_PACKAGE}"
         cp -a "openwrt-feed/${LUCI_PACKAGE}" "openwrt-sdk/package/custom/${LUCI_PACKAGE}"
@@ -88,6 +103,7 @@ runs:
       working-directory: openwrt-sdk
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
@@ -99,6 +115,7 @@ runs:
         LUCI_PACKAGE: ${{ inputs.luci_package }}
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         echo "CONFIG_PACKAGE_${MAIN_PACKAGE}=m" >> .config
         echo "CONFIG_PACKAGE_${LUCI_PACKAGE}=m" >> .config
         make defconfig
@@ -112,6 +129,7 @@ runs:
         LUCI_PACKAGE: ${{ inputs.luci_package }}
       run: |
         set -eux
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         make "package/custom/${MAIN_PACKAGE}/compile" V=s -j"$(nproc)"
         make "package/custom/${LUCI_PACKAGE}/compile" V=s -j"$(nproc)"
 
@@ -121,7 +139,8 @@ runs:
         ARCH: ${{ inputs.arch }}
       run: |
         set -eu
-        CONVERTER="$(find openwrt-sdk/build_dir -type f -name sb-sub-c -perm -111 | head -n 1)"
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
+        CONVERTER="$(find openwrt-sdk/build_dir -type f -name sb-sub-c -perm -111 -print -quit)"
         if [ -z "${CONVERTER}" ]; then
           echo "sb-sub-c was not produced" >&2
           exit 1
@@ -145,7 +164,7 @@ runs:
             ;;
         esac
 
-        if ! printf '%s\n' "${DESCRIPTION}" | grep -Eq "${EXPECT}"; then
+        if [[ ! "${DESCRIPTION}" =~ ${EXPECT} ]]; then
           echo "Converter ELF does not match ${ARCH} (wanted /${EXPECT}/)" >&2
           exit 1
         fi
@@ -161,6 +180,7 @@ runs:
         LUCI_PACKAGE: ${{ inputs.luci_package }}
       run: |
         set -eu
+        trap 'echo "::error::failed at line ${LINENO}: ${BASH_COMMAND} (exit $?)" >&2' ERR
         mkdir -p output_pkg
 
         # OpenWrt 24.10 ships opkg (.ipk); 25.12 ships apk (.apk). Accept both
@@ -171,7 +191,7 @@ runs:
           name="$1"; label="$2"
           found=""
           for ext in apk ipk; do
-            candidate="$(find openwrt-sdk/bin -type f -name "${name}[-_]*.${ext}" | head -n 1)"
+            candidate="$(find openwrt-sdk/bin -type f -name "${name}[-_]*.${ext}" -print -quit)"
             if [ -n "${candidate}" ]; then
               cp -v "${candidate}" "output_pkg/${label}.${ext}"
               found=1
