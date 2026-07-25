@@ -1,0 +1,347 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+LOG_TAG="liquid-formula-logo"
+ASSET_DIR="/etc/liquid-formula/assets"
+PACKAGE_DEFAULT="/usr/share/liquid-formula/assets/default-logo.svg"
+DEFAULT_LOGO="${ASSET_DIR}/default-logo.svg"
+RUNTIME_SOURCE="/www/luci-static/liquid-formula/customlogo-runtime.js"
+RUNTIME_DIR="/www/luci-static/liquid-formula/customlogo"
+MAX_IMAGE_DIMENSION=2048
+
+BOOTSTRAP_HEADER="/usr/share/ucode/luci/template/themes/bootstrap/header.ut"
+ARGON_LUA_HEADER="/usr/lib/lua/luci/view/themes/argon/header.htm"
+ARGON_LUA_LOGIN="/usr/lib/lua/luci/view/themes/argon/header_login.htm"
+ARGON_UCODE_HEADER="/usr/share/ucode/luci/template/themes/argon/header.ut"
+ARGON_UCODE_LOGIN="/usr/share/ucode/luci/template/themes/argon/header_login.ut"
+FLUENT_HEADER="/usr/share/ucode/luci/template/themes/fluent/header.ut"
+FLUENT_LOGIN="/usr/share/ucode/luci/template/themes/fluent/header_login.ut"
+
+MARKER_START='<!-- LFAPP_CUSTOMLOGO_START -->'
+MARKER_END='<!-- LFAPP_CUSTOMLOGO_END -->'
+
+log_info() {
+	logger -t "$LOG_TAG" "$*" 2>/dev/null || true
+}
+
+ensure_assets() {
+	local owner temporary
+	umask 077
+	[ ! -L "$ASSET_DIR" ] || return 1
+	if [ -e "$ASSET_DIR" ]; then
+		[ -d "$ASSET_DIR" ] || return 1
+	else
+		mkdir -p "$ASSET_DIR" || return 1
+	fi
+	[ -d "$ASSET_DIR" ] && [ ! -L "$ASSET_DIR" ] || return 1
+	owner="$(stat -c '%u' "$ASSET_DIR" 2>/dev/null)"
+	[ "$owner" = '0' ] || return 1
+	chmod 0700 "$ASSET_DIR" 2>/dev/null || return 1
+
+	[ -f "$PACKAGE_DEFAULT" ] && [ ! -L "$PACKAGE_DEFAULT" ] || return 1
+	if [ -L "$DEFAULT_LOGO" ]; then
+		rm -f "$DEFAULT_LOGO" || return 1
+	elif [ -e "$DEFAULT_LOGO" ] && [ ! -f "$DEFAULT_LOGO" ]; then
+		return 1
+	fi
+
+	if ! cmp -s "$PACKAGE_DEFAULT" "$DEFAULT_LOGO" 2>/dev/null; then
+		temporary="$(mktemp "$ASSET_DIR/.default-logo.XXXXXX")" || return 1
+		cp "$PACKAGE_DEFAULT" "$temporary" || {
+			rm -f "$temporary" 2>/dev/null || true
+			return 1
+		}
+		chmod 0600 "$temporary" 2>/dev/null || true
+		mv -f "$temporary" "$DEFAULT_LOGO" || {
+			rm -f "$temporary" 2>/dev/null || true
+			return 1
+		}
+	fi
+	chmod 0600 "$DEFAULT_LOGO" 2>/dev/null || return 1
+}
+
+file_size() {
+	local size
+	size="$(wc -c < "$1" 2>/dev/null)"
+	case "$size" in
+		''|*[!0-9]*) printf '0\n' ;;
+		*) printf '%s\n' "$size" ;;
+	esac
+}
+
+png_is_valid() {
+	local file="$1" signature chunk dimensions width height
+	signature="$(od -An -tu1 -N8 "$file" 2>/dev/null)"
+	set -- $signature
+	[ "$#" -eq 8 ] &&
+		[ "$1" = 137 ] && [ "$2" = 80 ] && [ "$3" = 78 ] && [ "$4" = 71 ] &&
+		[ "$5" = 13 ] && [ "$6" = 10 ] && [ "$7" = 26 ] && [ "$8" = 10 ] || return 1
+
+	chunk="$(dd if="$file" bs=1 skip=12 count=4 2>/dev/null | od -An -tu1)"
+	set -- $chunk
+	[ "$#" -eq 4 ] && [ "$1" = 73 ] && [ "$2" = 72 ] &&
+		[ "$3" = 68 ] && [ "$4" = 82 ] || return 1
+
+	dimensions="$(dd if="$file" bs=1 skip=16 count=8 2>/dev/null | od -An -tu1)"
+	set -- $dimensions
+	[ "$#" -eq 8 ] || return 1
+	width=$((($1 * 16777216) + ($2 * 65536) + ($3 * 256) + $4))
+	height=$((($5 * 16777216) + ($6 * 65536) + ($7 * 256) + $8))
+	[ "$width" -ge 1 ] && [ "$width" -le "$MAX_IMAGE_DIMENSION" ] &&
+		[ "$height" -ge 1 ] && [ "$height" -le "$MAX_IMAGE_DIMENSION" ]
+}
+
+ico_is_valid() {
+	local file="$1" header entry_data entries width height size data_size data_offset directory_end
+	header="$(od -An -tu1 -N8 "$file" 2>/dev/null)"
+	set -- $header
+	[ "$#" -eq 8 ] && [ "$1" = 0 ] && [ "$2" = 0 ] &&
+		[ "$3" = 1 ] && [ "$4" = 0 ] || return 1
+	entries=$((($6 * 256) + $5))
+	[ "$entries" -ge 1 ] && [ "$entries" -le 64 ] || return 1
+	width="$7"
+	height="$8"
+	[ "$width" -ne 0 ] || width=256
+	[ "$height" -ne 0 ] || height=256
+	[ "$width" -ge 1 ] && [ "$width" -le "$MAX_IMAGE_DIMENSION" ] &&
+		[ "$height" -ge 1 ] && [ "$height" -le "$MAX_IMAGE_DIMENSION" ] || return 1
+
+	entry_data="$(dd if="$file" bs=1 skip=14 count=8 2>/dev/null | od -An -tu1)"
+	set -- $entry_data
+	[ "$#" -eq 8 ] || return 1
+	data_size=$(($1 + ($2 * 256) + ($3 * 65536) + ($4 * 16777216)))
+	data_offset=$(($5 + ($6 * 256) + ($7 * 65536) + ($8 * 16777216)))
+	directory_end=$((6 + (entries * 16)))
+	size="$(file_size "$file")"
+	[ "$data_size" -ge 1 ] && [ "$data_offset" -ge "$directory_end" ] &&
+		[ $((data_offset + data_size)) -le "$size" ]
+}
+
+valid_asset() {
+	local file="$1" kind="$2" name ext size
+
+	[ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
+	if [ "$file" = "$DEFAULT_LOGO" ]; then
+		[ -f "$PACKAGE_DEFAULT" ] || return 1
+		return 0
+	fi
+
+	case "$file" in
+		"$ASSET_DIR"/*) ;;
+		*) return 1 ;;
+	esac
+
+	name="${file##*/}"
+	[ -n "$name" ] && [ "${ASSET_DIR}/${name}" = "$file" ] || return 1
+	case "$name" in
+		*[!A-Za-z0-9._-]*|.*|'') return 1 ;;
+	esac
+
+	ext="${name##*.}"
+	ext="$(printf '%s' "$ext" | tr 'A-Z' 'a-z')"
+	case "$kind:$ext" in
+		logo:png|favicon:png|favicon:ico) ;;
+		*) return 1 ;;
+	esac
+
+	size="$(file_size "$file")"
+	[ "$size" -ge 1 ] && [ "$size" -le 524288 ] || return 1
+	case "$ext" in
+		png) png_is_valid "$file" ;;
+		ico) ico_is_valid "$file" ;;
+	esac
+}
+
+remove_marker() {
+	local template="$1"
+	[ -f "$template" ] || return 0
+
+	if grep -Fq "$MARKER_START" "$template" 2>/dev/null; then
+		sed -i "/LFAPP_CUSTOMLOGO_START/,/LFAPP_CUSTOMLOGO_END/d" "$template" 2>/dev/null ||
+			log_info "failed to remove Custom Logo marker from $template"
+	fi
+}
+
+remove_all_markers() {
+	local template
+	for template in \
+		"$BOOTSTRAP_HEADER" \
+		"$ARGON_LUA_HEADER" "$ARGON_LUA_LOGIN" \
+		"$ARGON_UCODE_HEADER" "$ARGON_UCODE_LOGIN" \
+		"$FLUENT_HEADER" "$FLUENT_LOGIN"; do
+		remove_marker "$template"
+	done
+}
+
+argon_version() {
+	local version
+
+	if command -v apk >/dev/null 2>&1; then
+		version="$(apk info -v luci-theme-argon 2>/dev/null | sed -n '1p')"
+		[ -n "$version" ] && { printf '%s\n' "$version"; return 0; }
+	fi
+
+	if command -v opkg >/dev/null 2>&1; then
+		version="$(opkg status luci-theme-argon 2>/dev/null |
+			sed -n 's/^Version:[[:space:]]*//p' | sed -n '1p')"
+		[ -n "$version" ] && { printf '%s\n' "$version"; return 0; }
+	fi
+
+	if [ -f /usr/lib/opkg/info/luci-theme-argon.control ]; then
+		sed -n 's/^Version:[[:space:]]*//p' /usr/lib/opkg/info/luci-theme-argon.control | sed -n '1p'
+	fi
+}
+
+argon_is_243() {
+	local version
+	version="$(argon_version)"
+	case "$version" in
+		2.4.3|2.4.3-r*|luci-theme-argon-2.4.3|luci-theme-argon-2.4.3-r*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+inject_template() {
+	local template="$1" stamp="$2" logo_url="$3" favicon_url="$4"
+	[ -f "$template" ] || return 0
+	grep -Fq '</head>' "$template" 2>/dev/null || {
+		log_info "skip template without </head>: $template"
+		return 0
+	}
+
+	remove_marker "$template"
+	sed -i "\#</head>#i\\
+$MARKER_START\\
+<link rel=\"stylesheet\" href=\"/luci-static/liquid-formula/customlogo/runtime.css?v=$stamp\">\\
+<script defer src=\"/luci-static/liquid-formula/customlogo/runtime.js?v=$stamp\" data-liquid-formula-logo=\"$logo_url\" data-liquid-formula-favicon=\"$favicon_url\"></script>\\
+$MARKER_END" "$template" 2>/dev/null ||
+		log_info "failed to inject Custom Logo marker into $template"
+}
+
+create_runtime() {
+	local logo="$1" favicon="$2" logo_ext favicon_ext stamp logo_url favicon_url
+
+	logo_ext="$(printf '%s' "${logo##*.}" | tr 'A-Z' 'a-z')"
+	favicon_ext="$(printf '%s' "${favicon##*.}" | tr 'A-Z' 'a-z')"
+	stamp="$(sha256sum "$logo" "$favicon" "$RUNTIME_SOURCE" 2>/dev/null |
+		sha256sum 2>/dev/null | cut -c1-16)"
+	case "$stamp" in
+		''|*[!A-Fa-f0-9]*) stamp="$(date +%s 2>/dev/null || printf '0')" ;;
+	esac
+
+	rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+	umask 022
+	mkdir -p "$RUNTIME_DIR" || return 1
+	chmod 0755 "$RUNTIME_DIR" 2>/dev/null || true
+	cp "$logo" "${RUNTIME_DIR}/logo.${logo_ext}" || {
+		rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+		return 1
+	}
+	cp "$favicon" "${RUNTIME_DIR}/favicon.${favicon_ext}" || {
+		rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+		return 1
+	}
+	cp "$RUNTIME_SOURCE" "${RUNTIME_DIR}/runtime.js" || {
+		rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+		return 1
+	}
+	chmod 0644 "${RUNTIME_DIR}/logo.${logo_ext}" \
+		"${RUNTIME_DIR}/favicon.${favicon_ext}" "${RUNTIME_DIR}/runtime.js" 2>/dev/null || true
+
+	logo_url="/luci-static/liquid-formula/customlogo/logo.${logo_ext}?v=${stamp}"
+	favicon_url="/luci-static/liquid-formula/customlogo/favicon.${favicon_ext}?v=${stamp}"
+	cat > "${RUNTIME_DIR}/runtime.css" <<EOF
+/* Package-owned runtime styles; regenerated on each apply. */
+body > header > a.brand,
+body.logged-in .sidenav-header > a.brand,
+body.logged-in header .flex1 > a.brand {
+	display: flex !important;
+	align-items: center !important;
+}
+body > header > a.brand::before,
+body.logged-in .sidenav-header > a.brand::before,
+body.logged-in header .flex1 > a.brand::before {
+	content: "";
+	display: inline-block;
+	width: 42px;
+	height: 28px;
+	margin-right: 7px;
+	flex: 0 0 42px;
+	background: url("$logo_url") center / contain no-repeat;
+}
+EOF
+	chmod 0644 "${RUNTIME_DIR}/runtime.css" 2>/dev/null || true
+
+	printf '%s\n%s\n%s\n' "$stamp" "$logo_url" "$favicon_url"
+}
+
+apply_logos() {
+	local enable logo favicon runtime_data stamp logo_url favicon_url template
+
+	ensure_assets || {
+		log_info "unable to prepare Custom Logo asset directory"
+		return 1
+	}
+
+	remove_all_markers
+	rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+
+	config_load customlogo
+	config_get enable main enable '0'
+	config_get logo main logo ''
+	config_get favicon main favicon ''
+	[ "$enable" = '1' ] || return 0
+
+	[ -n "$logo" ] || logo="$DEFAULT_LOGO"
+	[ -n "$favicon" ] || favicon="$DEFAULT_LOGO"
+	if ! valid_asset "$logo" logo; then
+		log_info "invalid configured logo; using the built-in asset"
+		logo="$DEFAULT_LOGO"
+	fi
+	if ! valid_asset "$favicon" favicon; then
+		log_info "invalid configured favicon; using the built-in asset"
+		favicon="$DEFAULT_LOGO"
+	fi
+
+	runtime_data="$(create_runtime "$logo" "$favicon")" || {
+		log_info "unable to create Custom Logo runtime resources"
+		return 1
+	}
+	stamp="$(printf '%s\n' "$runtime_data" | sed -n '1p')"
+	logo_url="$(printf '%s\n' "$runtime_data" | sed -n '2p')"
+	favicon_url="$(printf '%s\n' "$runtime_data" | sed -n '3p')"
+
+	inject_template "$BOOTSTRAP_HEADER" "$stamp" "$logo_url" "$favicon_url"
+
+	if argon_is_243; then
+		for template in "$ARGON_LUA_HEADER" "$ARGON_LUA_LOGIN" \
+			"$ARGON_UCODE_HEADER" "$ARGON_UCODE_LOGIN"; do
+			inject_template "$template" "$stamp" "$logo_url" "$favicon_url"
+		done
+	else
+		log_info "Argon detected without exact 2.4.3 package version; leaving it unchanged"
+	fi
+
+	inject_template "$FLUENT_HEADER" "$stamp" "$logo_url" "$favicon_url"
+	inject_template "$FLUENT_LOGIN" "$stamp" "$logo_url" "$favicon_url"
+}
+
+start_service() {
+	apply_logos
+}
+
+stop_service() {
+	remove_all_markers
+	rm -rf "$RUNTIME_DIR" 2>/dev/null || true
+}
+
+reload_service() {
+	apply_logos
+}
+
+service_triggers() {
+	procd_add_reload_trigger 'customlogo'
+}

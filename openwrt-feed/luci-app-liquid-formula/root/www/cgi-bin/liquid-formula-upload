@@ -1,0 +1,265 @@
+#!/bin/sh
+
+set -u
+set -f
+
+STAGING_DIR="${LFAPP_STAGING_DIR:-/var/run/liquid-formula-upload}"
+ASSET_DIR="${LFAPP_ASSET_DIR:-/etc/liquid-formula/assets}"
+PAYLOAD_DIR="${LFAPP_PAYLOAD_DIR:-/etc/liquid-formula/fakehttp-payloads}"
+CGI_UPLOAD="${LFAPP_CGI_UPLOAD:-/www/cgi-bin/cgi-upload}"
+MAX_IMAGE=524288
+MAX_PAYLOAD=1200
+MAX_QUOTA=4194304
+MAX_IMAGE_DIMENSION=2048
+MULTIPART_ALLOWANCE=65536
+
+respond() {
+	local status="$1" message="$2"
+	printf 'Status: %s\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n' "$status"
+	printf '{"ok":false,"error":"%s"}\n' "$message"
+}
+
+fail() {
+	respond "$1" "$2"
+	# A CGI response can describe an HTTP error while the helper itself exits
+	# successfully; this keeps uhttpd from replacing the JSON response body.
+	exit 0
+}
+
+file_size() {
+	local size
+	size="$(wc -c < "$1" 2>/dev/null)"
+	case "$size" in
+		''|*[!0-9]*) printf '0\n' ;;
+		*) printf '%s\n' "$size" ;;
+	esac
+}
+
+prepare_directory() {
+	local directory="$1" owner
+
+	# Never let mkdir or chmod follow an attacker-provided final-component
+	# symlink. Existing non-directories are rejected for the same reason.
+	[ ! -L "$directory" ] || return 1
+	if [ -e "$directory" ]; then
+		[ -d "$directory" ] || return 1
+	else
+		mkdir -p "$directory" || return 1
+	fi
+
+	# Recheck after creation to close the precheck/create window. A root-owned
+	# directory in /var/run cannot subsequently be replaced by an unprivileged
+	# process, and upload/final directories remain inaccessible at mode 0700.
+	[ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+	owner="$(stat -c '%u' "$directory" 2>/dev/null)"
+	[ "$owner" = '0' ] || return 1
+	chmod 0700 "$directory" || return 1
+}
+
+png_is_valid() {
+	local file="$1" signature chunk dimensions width height
+	signature="$(od -An -tu1 -N8 "$file" 2>/dev/null)"
+	set -- $signature
+	[ "$#" -eq 8 ] &&
+		[ "$1" = 137 ] && [ "$2" = 80 ] && [ "$3" = 78 ] && [ "$4" = 71 ] &&
+		[ "$5" = 13 ] && [ "$6" = 10 ] && [ "$7" = 26 ] && [ "$8" = 10 ] || return 1
+
+	chunk="$(dd if="$file" bs=1 skip=12 count=4 2>/dev/null | od -An -tu1)"
+	set -- $chunk
+	[ "$#" -eq 4 ] && [ "$1" = 73 ] && [ "$2" = 72 ] &&
+		[ "$3" = 68 ] && [ "$4" = 82 ] || return 1
+
+	dimensions="$(dd if="$file" bs=1 skip=16 count=8 2>/dev/null | od -An -tu1)"
+	set -- $dimensions
+	[ "$#" -eq 8 ] || return 1
+	width=$((($1 * 16777216) + ($2 * 65536) + ($3 * 256) + $4))
+	height=$((($5 * 16777216) + ($6 * 65536) + ($7 * 256) + $8))
+	[ "$width" -ge 1 ] && [ "$width" -le "$MAX_IMAGE_DIMENSION" ] &&
+		[ "$height" -ge 1 ] && [ "$height" -le "$MAX_IMAGE_DIMENSION" ]
+}
+
+ico_is_valid() {
+	local file="$1" header entry_data entries width height size data_size data_offset directory_end
+	header="$(od -An -tu1 -N8 "$file" 2>/dev/null)"
+	set -- $header
+	[ "$#" -eq 8 ] && [ "$1" = 0 ] && [ "$2" = 0 ] &&
+		[ "$3" = 1 ] && [ "$4" = 0 ] || return 1
+	entries=$((($6 * 256) + $5))
+	[ "$entries" -ge 1 ] && [ "$entries" -le 64 ] || return 1
+	width="$7"
+	height="$8"
+	[ "$width" -ne 0 ] || width=256
+	[ "$height" -ne 0 ] || height=256
+	[ "$width" -ge 1 ] && [ "$width" -le "$MAX_IMAGE_DIMENSION" ] &&
+		[ "$height" -ge 1 ] && [ "$height" -le "$MAX_IMAGE_DIMENSION" ] || return 1
+
+	entry_data="$(dd if="$file" bs=1 skip=14 count=8 2>/dev/null | od -An -tu1)"
+	set -- $entry_data
+	[ "$#" -eq 8 ] || return 1
+	data_size=$(($1 + ($2 * 256) + ($3 * 65536) + ($4 * 16777216)))
+	data_offset=$(($5 + ($6 * 256) + ($7 * 65536) + ($8 * 16777216)))
+	directory_end=$((6 + (entries * 16)))
+	size="$(file_size "$file")"
+	[ "$data_size" -ge 1 ] && [ "$data_offset" -ge "$directory_end" ] &&
+		[ $((data_offset + data_size)) -le "$size" ]
+}
+
+quota_bytes_without() {
+	local destination="$1" file total=0 size
+	set +f
+	for file in "$ASSET_DIR"/* "$PAYLOAD_DIR"/*; do
+		[ -f "$file" ] && [ ! -L "$file" ] || continue
+		[ "$file" = "$destination" ] && continue
+		size="$(file_size "$file")"
+		total=$((total + size))
+	done
+	set -f
+	printf '%s\n' "$total"
+}
+
+case "${REQUEST_METHOD:-POST}" in
+	POST) ;;
+	*) fail '405 Method Not Allowed' 'POST required' ;;
+esac
+
+length="${CONTENT_LENGTH:-}"
+case "$length" in
+	''|*[!0-9]*) fail '411 Length Required' 'valid Content-Length required' ;;
+esac
+[ "$length" -ge 1 ] || fail '400 Bad Request' 'empty request'
+
+kind=''
+name=''
+old_ifs="$IFS"
+IFS='&'
+for pair in ${QUERY_STRING:-}; do
+	case "$pair" in
+		kind=*) kind="${pair#kind=}" ;;
+		name=*) name="${pair#name=}" ;;
+	esac
+done
+IFS="$old_ifs"
+
+case "$kind" in
+	logo)
+		pending="$STAGING_DIR/pending-logo"
+		destination_dir="$ASSET_DIR"
+		logical_dir='/etc/liquid-formula/assets'
+		limit="$MAX_IMAGE"
+		allowed='png'
+		;;
+	favicon)
+		pending="$STAGING_DIR/pending-favicon"
+		destination_dir="$ASSET_DIR"
+		logical_dir='/etc/liquid-formula/assets'
+		limit="$MAX_IMAGE"
+		allowed='png ico'
+		;;
+	fakehttp)
+		pending="$STAGING_DIR/pending-fakehttp"
+		destination_dir="$PAYLOAD_DIR"
+		logical_dir='/etc/liquid-formula/fakehttp-payloads'
+		limit="$MAX_PAYLOAD"
+		allowed='bin'
+		;;
+	*) fail '400 Bad Request' 'unsupported upload kind' ;;
+esac
+
+[ "$length" -le $((limit + MULTIPART_ALLOWANCE)) ] ||
+	fail '413 Payload Too Large' 'request too large'
+
+case "$name" in
+	default-logo.svg) fail '409 Conflict' 'reserved file name' ;;
+	''|.*|*[!A-Za-z0-9._-]*) fail '400 Bad Request' 'invalid file name' ;;
+esac
+[ "${#name}" -le 96 ] || fail '400 Bad Request' 'file name too long'
+ext="${name##*.}"
+ext="$(printf '%s' "$ext" | tr 'A-Z' 'a-z')"
+case " $allowed " in
+	*" $ext "*) ;;
+	*) fail '415 Unsupported Media Type' 'unsupported file type' ;;
+esac
+
+umask 077
+prepare_directory "$STAGING_DIR" &&
+	prepare_directory "$ASSET_DIR" &&
+	prepare_directory "$PAYLOAD_DIR" ||
+	fail '500 Internal Server Error' 'unsafe upload directory'
+
+lock="$STAGING_DIR/.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+	fail '409 Conflict' 'another upload is in progress'
+fi
+tmp_final=''
+fixed_pending="$pending"
+cleanup() {
+	rm -f "$pending" "$fixed_pending" 2>/dev/null || true
+	[ -z "$tmp_final" ] || rm -f "$tmp_final" 2>/dev/null || true
+	rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM HUP
+set +f
+for stale in "$STAGING_DIR"/.reply-* "$STAGING_DIR"/.candidate-* \
+	"$ASSET_DIR"/.upload.* "$PAYLOAD_DIR"/.upload.*; do
+	[ -f "$stale" ] && [ ! -L "$stale" ] || continue
+	rm -f "$stale" 2>/dev/null || true
+done
+set -f
+rm -f "$pending" 2>/dev/null || true
+
+[ -x "$CGI_UPLOAD" ] || fail '500 Internal Server Error' 'upload helper unavailable'
+upload_reply="$(mktemp "$STAGING_DIR/.reply-$kind.XXXXXX")" ||
+	fail '500 Internal Server Error' 'unable to capture upload response'
+tmp_final="$upload_reply"
+if ! "$CGI_UPLOAD" > "$upload_reply"; then
+	fail '400 Bad Request' 'upload helper rejected the request'
+fi
+if grep -q '"failure"' "$upload_reply" 2>/dev/null; then
+	fail '403 Forbidden' 'upload permission denied'
+fi
+rm -f "$upload_reply"
+tmp_final=''
+
+[ -f "$pending" ] && [ ! -L "$pending" ] ||
+	fail '400 Bad Request' 'uploaded file missing'
+
+# Move the fixed ACL-writable path to a private random name before validation.
+# This closes the replacement window between format checks and the final copy.
+candidate="$(mktemp "$STAGING_DIR/.candidate-$kind.XXXXXX")" ||
+	fail '500 Internal Server Error' 'unable to isolate uploaded file'
+tmp_final="$candidate"
+mv -f "$pending" "$candidate" ||
+	fail '500 Internal Server Error' 'unable to isolate uploaded file'
+pending="$candidate"
+tmp_final=''
+
+size="$(file_size "$pending")"
+[ "$size" -ge 1 ] && [ "$size" -le "$limit" ] ||
+	fail '413 Payload Too Large' 'uploaded file too large'
+
+case "$ext" in
+	png) png_is_valid "$pending" || fail '415 Unsupported Media Type' 'invalid PNG image' ;;
+	ico) ico_is_valid "$pending" || fail '415 Unsupported Media Type' 'invalid ICO image' ;;
+	bin) ;;
+esac
+
+destination="$destination_dir/$name"
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+	[ -f "$destination" ] && [ ! -L "$destination" ] ||
+		fail '409 Conflict' 'destination name is not a regular file'
+fi
+used="$(quota_bytes_without "$destination")"
+[ $((used + size)) -le "$MAX_QUOTA" ] ||
+	fail '507 Insufficient Storage' 'upload directory quota exceeded'
+
+tmp_final="$(mktemp "$destination_dir/.upload.XXXXXX")" ||
+	fail '500 Internal Server Error' 'unable to create destination file'
+cp "$pending" "$tmp_final" || fail '500 Internal Server Error' 'unable to store upload'
+chmod 0600 "$tmp_final" 2>/dev/null || true
+mv -f "$tmp_final" "$destination" || fail '500 Internal Server Error' 'unable to activate upload'
+tmp_final=''
+rm -f "$pending" 2>/dev/null || true
+
+printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+printf '{"ok":true,"path":"%s/%s","name":"%s","size":%s}\n' \
+	"$logical_dir" "$name" "$name" "$size"

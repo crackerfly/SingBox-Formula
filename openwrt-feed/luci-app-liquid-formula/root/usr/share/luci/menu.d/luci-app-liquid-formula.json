@@ -1,0 +1,66 @@
+{
+  "admin/services/liquid-formula": {
+    "title": "Liquid Formula",
+    "order": 80,
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-liquid-formula"
+      ]
+    }
+  },
+  "admin/services/liquid-formula/customlogo": {
+    "title": "Tuning Utility",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "liquid-formula/customlogo"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-liquid-formula"
+      ]
+    }
+  },
+  "admin/services/liquid-formula/overview": {
+    "title": "Singbox Formula",
+    "order": 20,
+    "action": {
+      "type": "view",
+      "path": "liquid-formula/overview"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-liquid-formula"
+      ]
+    }
+  },
+  "admin/services/liquid-formula/fakehttp": {
+    "title": "FakeHTTP",
+    "order": 30,
+    "action": {
+      "type": "view",
+      "path": "liquid-formula/fakehttp"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-liquid-formula"
+      ]
+    }
+  },
+  "admin/services/liquid-formula/fakesip": {
+    "title": "FakeSIP",
+    "order": 40,
+    "action": {
+      "type": "view",
+      "path": "liquid-formula/fakesip"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-liquid-formula"
+      ]
+    }
+  }
+}

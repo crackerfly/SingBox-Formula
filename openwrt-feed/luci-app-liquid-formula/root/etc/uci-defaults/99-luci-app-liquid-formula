@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# luci-app-liquid-formula 的安装后初始化。
+#
+# 资产目录与默认 SVG 由 init 脚本的 ensure_assets() 兜底创建, 这里只负责
+# 让 logo 服务在重启后依然生效, 并刷新 LuCI 的缓存索引。
+
+# Custom Logo 默认不启用: 装了这个包不代表用户想换掉 LuCI 的标识。
+[ -n "$(uci -q get customlogo.main.enabled)" ] || \
+	uci -q set customlogo.main.enabled=0
+uci -q commit customlogo
+
+# 调优默认值以系统当前实际状态为准, 这样装完打开页面看到的就是真实情况,
+# 而不是一组凭空写死、和运行时对不上的推荐值。
+seed_from_proc() {
+	local option="$1" proc_path="$2" fallback="$3" value=''
+	[ -z "$(uci -q get tuning.main.$option)" ] || return 0
+	[ -r "$proc_path" ] && value="$(head -n 1 "$proc_path" 2>/dev/null | tr -d '\r')"
+	[ -n "$value" ] || value="$fallback"
+	uci -q set "tuning.main.$option=$value"
+}
+
+[ -n "$(uci -q get tuning.main 2>/dev/null)" ] || uci -q set tuning.main=tuning
+[ -n "$(uci -q get tuning.main.enabled)" ] || uci -q set tuning.main.enabled=0
+seed_from_proc tcp_fastopen        /proc/sys/net/ipv4/tcp_fastopen           3
+seed_from_proc default_qdisc       /proc/sys/net/core/default_qdisc          cake
+seed_from_proc congestion_control  /proc/sys/net/ipv4/tcp_congestion_control bbr
+seed_from_proc tcp_max_syn_backlog /proc/sys/net/ipv4/tcp_max_syn_backlog    512
+
+# irqbalance 开关如实反映它自己的配置, 不替用户做决定。
+if [ -z "$(uci -q get tuning.main.irqbalance)" ]; then
+	uci -q set "tuning.main.irqbalance=$(uci -q get irqbalance.irqbalance.enabled 2>/dev/null || echo 0)"
+fi
+uci -q commit tuning
+
+if [ -x /etc/init.d/liquid-formula-logo ]; then
+	/etc/init.d/liquid-formula-logo enable >/dev/null 2>&1 || true
+	# start 会自行读取 enabled; 关闭状态下它只做清理不注入。
+	/etc/init.d/liquid-formula-logo start >/dev/null 2>&1 || true
+fi
+
+# 缓存清理由 postinst 负责, 这里不重复。
+
+exit 0

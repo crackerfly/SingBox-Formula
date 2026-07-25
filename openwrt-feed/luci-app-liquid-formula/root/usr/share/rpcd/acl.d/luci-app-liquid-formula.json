@@ -1,0 +1,104 @@
+{
+  "luci-app-liquid-formula": {
+    "description": "Grant access to Liquid Formula (converter, custom logo, FakeHTTP, FakeSIP)",
+    "read": {
+      "ubus": {
+        "liquid_formula": [
+          "list_templates",
+          "read_template",
+          "status",
+          "tuning_status"
+        ],
+        "service": [
+          "list"
+        ]
+      },
+      "uci": [
+        "customlogo",
+        "fakehttp",
+        "fakesip",
+        "irqbalance",
+        "liquid_formula",
+        "momo",
+        "tuning"
+      ],
+      "file": {
+        "/etc/liquid-formula/assets": [
+          "list",
+          "read"
+        ],
+        "/etc/liquid-formula/assets/*": [
+          "read"
+        ],
+        "/etc/liquid-formula/fakehttp-payloads": [
+          "list",
+          "read"
+        ],
+        "/etc/liquid-formula/fakehttp-payloads/*": [
+          "read"
+        ],
+        "/sys/class/net": [
+          "list"
+        ],
+        "/proc/net/route": [
+          "read"
+        ],
+        "/sbin/logread -e fakehttp": [
+          "exec"
+        ],
+        "/sbin/logread -e fakesip": [
+          "exec"
+        ],
+        "/proc/sys/net/ipv4/tcp_available_congestion_control": [
+          "read"
+        ],
+        "/proc/sys/net/ipv4/tcp_congestion_control": [
+          "read"
+        ],
+        "/proc/sys/net/core/default_qdisc": [
+          "read"
+        ]
+      },
+      "cgi-io": [
+        "exec"
+      ]
+    },
+    "write": {
+      "ubus": {
+        "liquid_formula": [
+          "check",
+          "delete_template",
+          "generate",
+          "refresh",
+          "service_action",
+          "tuning_apply",
+          "update",
+          "write_template"
+        ]
+      },
+      "uci": [
+        "customlogo",
+        "fakehttp",
+        "fakesip",
+        "irqbalance",
+        "liquid_formula",
+        "momo",
+        "tuning"
+      ],
+      "file": {
+        "/var/run/liquid-formula-upload/pending-logo": [
+          "write"
+        ],
+        "/var/run/liquid-formula-upload/pending-favicon": [
+          "write"
+        ],
+        "/var/run/liquid-formula-upload/pending-fakehttp": [
+          "write"
+        ]
+      },
+      "cgi-io": [
+        "upload"
+      ]
+    }
+  }
+}

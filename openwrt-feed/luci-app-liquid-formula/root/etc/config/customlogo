@@ -1,0 +1,4 @@
+config customlogo 'main'
+	option enable '0'
+	option favicon '/etc/liquid-formula/assets/default-logo.svg'
+	option logo '/etc/liquid-formula/assets/default-logo.svg'

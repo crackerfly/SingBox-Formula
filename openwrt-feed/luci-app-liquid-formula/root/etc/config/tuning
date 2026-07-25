@@ -1,0 +1,19 @@
+config tuning 'main'
+	# 是否由本包接管这些内核参数。关闭时只做展示, 不写任何文件。
+	option enabled '0'
+
+	# TCP Fast Open: 3 = 客户端与服务端都启用
+	option tcp_fastopen '3'
+
+	# 默认排队规则。cake 需要 kmod-sched-cake; fq_codel 通常已内建。
+	option default_qdisc 'cake'
+
+	# 拥塞控制算法。bbr 需要 kmod-tcp-bbr。
+	option congestion_control 'bbr'
+
+	# 半连接队列长度
+	option tcp_max_syn_backlog '512'
+
+	# 中断负载均衡。MT7622 是双核 A53, 关闭时网卡中断容易全压在 CPU0 上,
+	# 高吞吐 / PPPoE 转发场景下单核吃满会限制整体性能。
+	option irqbalance '0'
