@@ -1,0 +1,188 @@
+{
+  "openwrt": [
+    {
+      "version": "24.10",
+      "luci_build_arch": "x86_64",
+      "targets": [
+        {
+          "arch": "aarch64_cortex-a53",
+          "target": "mediatek/mt7622"
+        },
+        {
+          "arch": "aarch64_cortex-a72",
+          "target": "mvebu/cortexa72"
+        },
+        {
+          "arch": "aarch64_cortex-a76",
+          "target": "bcm27xx/bcm2712"
+        },
+        {
+          "arch": "aarch64_generic",
+          "target": "armsr/armv8"
+        },
+        {
+          "arch": "arm_cortex-a15_neon-vfpv4",
+          "target": "armsr/armv7"
+        },
+        {
+          "arch": "arm_cortex-a5_vfpv4",
+          "target": "at91/sama5"
+        },
+        {
+          "arch": "arm_cortex-a7_neon-vfpv4",
+          "target": "ipq40xx/generic"
+        },
+        {
+          "arch": "arm_cortex-a8_vfpv3",
+          "target": "sunxi/cortexa8"
+        },
+        {
+          "arch": "arm_cortex-a9",
+          "target": "bcm53xx/generic"
+        },
+        {
+          "arch": "arm_cortex-a9_neon",
+          "target": "imx/cortexa9"
+        },
+        {
+          "arch": "arm_cortex-a9_vfpv3-d16",
+          "target": "mvebu/cortexa9"
+        },
+        {
+          "arch": "i386_pentium4",
+          "target": "x86/generic"
+        },
+        {
+          "arch": "mips64_octeonplus",
+          "target": "octeon/generic"
+        },
+        {
+          "arch": "mips_24kc",
+          "target": "ath79/generic"
+        },
+        {
+          "arch": "mips_mips32",
+          "target": "bmips/bcm6328"
+        },
+        {
+          "arch": "mipsel_24kc",
+          "target": "ramips/mt7621"
+        },
+        {
+          "arch": "mipsel_24kc_24kf",
+          "target": "pistachio/generic"
+        },
+        {
+          "arch": "mipsel_74kc",
+          "target": "bcm47xx/mips74k"
+        },
+        {
+          "arch": "mipsel_mips32",
+          "target": "bcm47xx/generic"
+        },
+        {
+          "arch": "riscv64_riscv64",
+          "target": "sifiveu/generic"
+        },
+        {
+          "arch": "x86_64",
+          "target": "x86/64"
+        }
+      ]
+    },
+    {
+      "version": "25.12",
+      "luci_build_arch": "x86_64",
+      "targets": [
+        {
+          "arch": "aarch64_cortex-a53",
+          "target": "mediatek/mt7622"
+        },
+        {
+          "arch": "aarch64_cortex-a72",
+          "target": "mvebu/cortexa72"
+        },
+        {
+          "arch": "aarch64_cortex-a76",
+          "target": "bcm27xx/bcm2712"
+        },
+        {
+          "arch": "aarch64_generic",
+          "target": "armsr/armv8"
+        },
+        {
+          "arch": "arm_cortex-a15_neon-vfpv4",
+          "target": "armsr/armv7"
+        },
+        {
+          "arch": "arm_cortex-a5_vfpv4",
+          "target": "at91/sama5"
+        },
+        {
+          "arch": "arm_cortex-a7_neon-vfpv4",
+          "target": "ipq40xx/generic"
+        },
+        {
+          "arch": "arm_cortex-a8_vfpv3",
+          "target": "sunxi/cortexa8"
+        },
+        {
+          "arch": "arm_cortex-a9",
+          "target": "bcm53xx/generic"
+        },
+        {
+          "arch": "arm_cortex-a9_neon",
+          "target": "imx/cortexa9"
+        },
+        {
+          "arch": "arm_cortex-a9_vfpv3-d16",
+          "target": "mvebu/cortexa9"
+        },
+        {
+          "arch": "i386_pentium4",
+          "target": "x86/generic"
+        },
+        {
+          "arch": "loongarch64_generic",
+          "target": "loongarch64/generic"
+        },
+        {
+          "arch": "mips64_octeonplus",
+          "target": "octeon/generic"
+        },
+        {
+          "arch": "mips_24kc",
+          "target": "ath79/generic"
+        },
+        {
+          "arch": "mips_mips32",
+          "target": "bmips/bcm6328"
+        },
+        {
+          "arch": "mipsel_24kc",
+          "target": "ramips/mt7621"
+        },
+        {
+          "arch": "mipsel_24kc_24kf",
+          "target": "pistachio/generic"
+        },
+        {
+          "arch": "mipsel_74kc",
+          "target": "bcm47xx/mips74k"
+        },
+        {
+          "arch": "mipsel_mips32",
+          "target": "bcm47xx/generic"
+        },
+        {
+          "arch": "riscv64_generic",
+          "target": "sifiveu/generic"
+        },
+        {
+          "arch": "x86_64",
+          "target": "x86/64"
+        }
+      ]
+    }
+  ]
+}
