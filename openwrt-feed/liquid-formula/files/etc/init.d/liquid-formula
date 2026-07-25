@@ -1,0 +1,474 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+NAME='liquid-formula'
+PROG='/usr/bin/sb-sub-c'
+CONFIG='liquid_formula'
+GEN='/usr/share/liquid-formula/generate-config.sh'
+DELAY_HELPER='/usr/share/liquid-formula/run-delayed.sh'
+CONF='/etc/liquid-formula/config.yaml'
+WORKDIR='/etc/liquid-formula'
+STATE_DIR=${SBF_STATE_DIR:-/var/run/liquid-formula}
+LIFECYCLE_LOCK=${SBF_LIFECYCLE_LOCK_DIR:-$STATE_DIR/lifecycle.lock}
+
+LF_LIFECYCLE_DEPTH=0
+LF_LIFECYCLE_OWNED=0
+LF_LIFECYCLE_EXTERNAL=0
+LF_LIFECYCLE_DELEGATED=0
+LF_START_RC=0
+LF_STOP_RC=0
+LF_PROCD_CLOSE_RC=0
+LF_PROCD_KILL_RC=0
+
+# OpenWrt's public procd wrappers restore the JSON namespace after invoking the
+# internal operation. Preserve the operation's status while doing the same so
+# service_started/service_stopped can release our lifecycle lock without hiding
+# a failed service publication or deletion.
+lf_procd_call_status() {
+	local old_cb rc restore_rc
+	json_set_namespace procd old_cb || return $?
+	"$@"
+	rc=$?
+	json_set_namespace "$old_cb"
+	restore_rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	return "$restore_rc"
+}
+
+lf_procd_close_service() {
+	lf_procd_call_status _procd_close_service "$@"
+	LF_PROCD_CLOSE_RC=$?
+	return "$LF_PROCD_CLOSE_RC"
+}
+
+lf_procd_kill() {
+	lf_procd_call_status _procd_kill "$@"
+	LF_PROCD_KILL_RC=$?
+	return "$LF_PROCD_KILL_RC"
+}
+
+lf_process_start() {
+	local pid="$1" line
+	[ -r "/proc/$pid/stat" ] || return 1
+	IFS= read -r line < "/proc/$pid/stat" || return 1
+	printf '%s\n' "$line" | awk '{ sub(/^.*\) /, ""); split($0,f," "); print f[20] }'
+}
+
+lf_read_lifecycle_owner() {
+	local extra
+	LF_OWNER_PID=
+	LF_OWNER_START=
+	LF_OWNER_TOKEN=
+	[ -f "$LIFECYCLE_LOCK/owner" ] && [ ! -L "$LIFECYCLE_LOCK/owner" ] || return 1
+	IFS=' ' read -r LF_OWNER_PID LF_OWNER_START LF_OWNER_TOKEN extra < "$LIFECYCLE_LOCK/owner" || return 1
+	[ -z "$extra" ] || return 1
+	case "$LF_OWNER_PID" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LF_OWNER_START" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LF_OWNER_TOKEN" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+lf_read_lifecycle_delegate() {
+	local extra
+	LF_DELEGATE_PID=
+	LF_DELEGATE_START=
+	LF_DELEGATE_TOKEN=
+	[ -f "$LIFECYCLE_LOCK/delegate" ] && [ ! -L "$LIFECYCLE_LOCK/delegate" ] || return 1
+	IFS=' ' read -r LF_DELEGATE_PID LF_DELEGATE_START LF_DELEGATE_TOKEN extra < "$LIFECYCLE_LOCK/delegate" || return 1
+	[ -z "$extra" ] || return 1
+	case "$LF_DELEGATE_PID" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LF_DELEGATE_START" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LF_DELEGATE_TOKEN" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+# Return success when recovery must stop. A live delegate is an active init
+# child executing on behalf of the owner; an unreadable marker is also treated
+# as busy. A valid dead marker is removed so crashes do not wedge the lock.
+lf_lifecycle_delegate_blocks_recovery() {
+	local current observed
+	[ -e "$LIFECYCLE_LOCK/delegate" ] || [ -L "$LIFECYCLE_LOCK/delegate" ] || return 1
+	lf_read_lifecycle_delegate || return 0
+	current=$(lf_process_start "$LF_DELEGATE_PID" 2>/dev/null || true)
+	if [ -n "$current" ] && [ "$current" = "$LF_DELEGATE_START" ]; then
+		return 0
+	fi
+	observed=$(cat "$LIFECYCLE_LOCK/delegate" 2>/dev/null) || return 0
+	[ "$observed" = "$LF_DELEGATE_PID $LF_DELEGATE_START $LF_DELEGATE_TOKEN" ] || return 0
+	rm -f "$LIFECYCLE_LOCK/delegate" || return 0
+	return 1
+}
+
+lf_release_lifecycle_delegate() {
+	local self_start observed
+	[ "$LF_LIFECYCLE_DELEGATED" = 1 ] || return 0
+	self_start=$(lf_process_start $$ 2>/dev/null) || return 1
+	if lf_read_lifecycle_delegate; then
+		observed="$LF_DELEGATE_PID $LF_DELEGATE_START $LF_DELEGATE_TOKEN"
+		if [ "$observed" = "$$ $self_start $LF_LIFECYCLE_TOKEN" ]; then
+			rm -f "$LIFECYCLE_LOCK/delegate" 2>/dev/null
+			# The delegating parent may have died and removed its owner record
+			# while waiting. Remove the now-empty directory when possible.
+			rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true
+		fi
+	fi
+	LF_LIFECYCLE_DELEGATED=0
+}
+
+lf_acquire_lifecycle_delegate() {
+	local parent current self_start claim owner_pid owner_start owner_token
+	[ -n "${LF_LIFECYCLE_TOKEN:-}" ] || return 75
+	lf_read_lifecycle_owner || return 75
+	owner_pid=$LF_OWNER_PID
+	owner_start=$LF_OWNER_START
+	owner_token=$LF_OWNER_TOKEN
+	[ "$owner_token" = "$LF_LIFECYCLE_TOKEN" ] || return 75
+	current=$(lf_process_start "$owner_pid" 2>/dev/null) || return 75
+	[ "$current" = "$owner_start" ] || return 75
+
+	# Clear only a verifiably dead delegate left by a crashed init child.
+	lf_lifecycle_delegate_blocks_recovery && return 75
+	parent=${LIFECYCLE_LOCK%/*}
+	self_start=$(lf_process_start $$) || return 75
+	case "$self_start" in ''|*[!0-9]*) return 75 ;; esac
+	claim=$(mktemp "$parent/.lifecycle-delegate.XXXXXX") || return 75
+	printf '%s %s %s\n' "$$" "$self_start" "$LF_LIFECYCLE_TOKEN" > "$claim" || {
+		rm -f "$claim"
+		return 75
+	}
+	chmod 0600 "$claim" || {
+		rm -f "$claim"
+		return 75
+	}
+	# ln is the atomic no-overwrite publication primitive available on BusyBox.
+	# The claim lives on the same filesystem as the lock, so this is a hard link.
+	ln "$claim" "$LIFECYCLE_LOCK/delegate" 2>/dev/null || {
+		rm -f "$claim"
+		return 75
+	}
+	rm -f "$claim"
+
+	# Publishing first prevents rmdir. Revalidate the exact owner and its process
+	# identity before doing any service work; if recovery won the race, abort.
+	if ! lf_read_lifecycle_owner ||
+		[ "$LF_OWNER_PID" != "$owner_pid" ] ||
+		[ "$LF_OWNER_START" != "$owner_start" ] ||
+		[ "$LF_OWNER_TOKEN" != "$owner_token" ]; then
+		LF_LIFECYCLE_DELEGATED=1
+		lf_release_lifecycle_delegate
+		return 75
+	fi
+	current=$(lf_process_start "$owner_pid" 2>/dev/null) || {
+		LF_LIFECYCLE_DELEGATED=1
+		lf_release_lifecycle_delegate
+		return 75
+	}
+	[ "$current" = "$owner_start" ] || {
+		LF_LIFECYCLE_DELEGATED=1
+		lf_release_lifecycle_delegate
+		return 75
+	}
+	LF_LIFECYCLE_DELEGATED=1
+	return 0
+}
+
+lf_acquire_lifecycle_lock() {
+	local parent current observed claim self_start attempts=0 empty_wait
+	parent=${LIFECYCLE_LOCK%/*}
+	mkdir -p "$parent" || return 1
+	[ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+	chmod 0700 "$parent" || return 1
+	self_start=$(lf_process_start $$) || return 1
+	case "$self_start" in ''|*[!0-9]*) return 1 ;; esac
+	LF_LIFECYCLE_TOKEN="$$.$(date +%s).$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+	claim=$(mktemp "$parent/.lifecycle-owner.XXXXXX") || return 1
+	printf '%s %s %s\n' "$$" "$self_start" "$LF_LIFECYCLE_TOKEN" > "$claim" || {
+		rm -f "$claim"
+		return 1
+	}
+	chmod 0600 "$claim" || {
+		rm -f "$claim"
+		return 1
+	}
+	while [ "$attempts" -lt 3 ]; do
+		if mkdir "$LIFECYCLE_LOCK" 2>/dev/null; then
+			mv "$claim" "$LIFECYCLE_LOCK/owner" || {
+				rmdir "$LIFECYCLE_LOCK" 2>/dev/null || true
+				rm -f "$claim"
+				return 1
+			}
+			LF_LIFECYCLE_OWNED=1
+			export LF_LIFECYCLE_TOKEN
+			return 0
+		fi
+		[ -d "$LIFECYCLE_LOCK" ] && [ ! -L "$LIFECYCLE_LOCK" ] || {
+			rm -f "$claim"
+			return 1
+		}
+		if [ ! -e "$LIFECYCLE_LOCK/owner" ]; then
+			empty_wait=0
+			while [ "$empty_wait" -lt 2 ] && [ ! -e "$LIFECYCLE_LOCK/owner" ]; do
+				sleep 1
+				empty_wait=$((empty_wait + 1))
+			done
+			if [ ! -e "$LIFECYCLE_LOCK/owner" ]; then
+				if lf_lifecycle_delegate_blocks_recovery; then
+					rm -f "$claim"
+					return 75
+				fi
+				if rmdir "$LIFECYCLE_LOCK" 2>/dev/null; then
+					attempts=$((attempts + 1))
+					continue
+				fi
+				rm -f "$claim"
+				return 75
+			fi
+		fi
+		lf_read_lifecycle_owner || {
+			rm -f "$claim"
+			return 75
+		}
+		current=$(lf_process_start "$LF_OWNER_PID" 2>/dev/null || true)
+		if [ -n "$current" ] && [ "$current" = "$LF_OWNER_START" ]; then
+			rm -f "$claim"
+			return 75
+		fi
+		if lf_lifecycle_delegate_blocks_recovery; then
+			rm -f "$claim"
+			return 75
+		fi
+		# Delegate inspection may have raced another owner change.
+		lf_read_lifecycle_owner || {
+			rm -f "$claim"
+			return 75
+		}
+		current=$(lf_process_start "$LF_OWNER_PID" 2>/dev/null || true)
+		if [ -n "$current" ] && [ "$current" = "$LF_OWNER_START" ]; then
+			rm -f "$claim"
+			return 75
+		fi
+		observed=$(cat "$LIFECYCLE_LOCK/owner" 2>/dev/null) || {
+			rm -f "$claim"
+			return 75
+		}
+		[ "$observed" = "$LF_OWNER_PID $LF_OWNER_START $LF_OWNER_TOKEN" ] || {
+			rm -f "$claim"
+			return 75
+		}
+		rm -f "$LIFECYCLE_LOCK/owner" && rmdir "$LIFECYCLE_LOCK" || {
+			rm -f "$claim"
+			return 75
+		}
+		attempts=$((attempts + 1))
+	done
+	rm -f "$claim"
+	return 75
+}
+
+lf_release_lifecycle_lock() {
+	local self_start
+	[ "$LF_LIFECYCLE_OWNED" = 1 ] || return 0
+	self_start=$(lf_process_start $$ 2>/dev/null) || return 1
+	if lf_read_lifecycle_owner &&
+		[ "$LF_OWNER_PID" = "$$" ] &&
+		[ "$LF_OWNER_START" = "$self_start" ] &&
+		[ "$LF_OWNER_TOKEN" = "$LF_LIFECYCLE_TOKEN" ]; then
+		rm -f "$LIFECYCLE_LOCK/owner" 2>/dev/null
+		rmdir "$LIFECYCLE_LOCK" 2>/dev/null
+	fi
+	LF_LIFECYCLE_OWNED=0
+	LF_LIFECYCLE_TOKEN=
+}
+
+lf_lifecycle_enter() {
+	if [ "$LF_LIFECYCLE_DEPTH" -gt 0 ] 2>/dev/null; then
+		LF_LIFECYCLE_DEPTH=$((LF_LIFECYCLE_DEPTH + 1))
+		return 0
+	fi
+	if [ -n "${LF_LIFECYCLE_TOKEN:-}" ]; then
+		lf_acquire_lifecycle_delegate || return $?
+		LF_LIFECYCLE_EXTERNAL=1
+		LF_LIFECYCLE_DEPTH=1
+		return 0
+	fi
+	lf_acquire_lifecycle_lock || return $?
+	LF_LIFECYCLE_EXTERNAL=0
+	LF_LIFECYCLE_DEPTH=1
+}
+
+lf_lifecycle_leave() {
+	[ "$LF_LIFECYCLE_DEPTH" -gt 0 ] 2>/dev/null || return 0
+	LF_LIFECYCLE_DEPTH=$((LF_LIFECYCLE_DEPTH - 1))
+	[ "$LF_LIFECYCLE_DEPTH" = 0 ] || return 0
+	if [ "$LF_LIFECYCLE_OWNED" = 1 ]; then
+		lf_release_lifecycle_lock
+	elif [ "$LF_LIFECYCLE_DELEGATED" = 1 ]; then
+		lf_release_lifecycle_delegate
+	fi
+	LF_LIFECYCLE_EXTERNAL=0
+}
+
+lf_start_service_locked() {
+	. /lib/functions.sh
+	config_load "$CONFIG"
+
+	local mode enabled delay digest tz
+	mode="${1:-reconcile}"
+	config_get_bool enabled main enabled 0
+
+	case "$mode" in
+		boot)
+			[ "$enabled" = "1" ] || return 0
+			;;
+		manual)
+			;;
+		reconcile)
+			;;
+		*)
+			echo "invalid service start mode: $mode" >&2
+			return 2
+			;;
+	esac
+
+	mkdir -p /var/lib/liquid-formula/cache /var/log/liquid-formula "$WORKDIR"
+	"$GEN" >/dev/null || return 1
+
+	# Reconcile always regenerates the canonical file. Publishing no instance
+	# then removes main without depending on converter executable availability.
+	if [ "$mode" = "reconcile" ] && [ "$enabled" != "1" ]; then
+		return 0
+	fi
+
+	[ -x "$PROG" ] || {
+		echo "$PROG not found or not executable" >&2
+		return 1
+	}
+	if [ "$mode" = "boot" ]; then
+		[ -x "$DELAY_HELPER" ] || {
+			echo "$DELAY_HELPER not found or not executable" >&2
+			return 1
+		}
+		config_get delay main boot_delay 90
+	fi
+
+	digest="$(sha256sum "$CONF" 2>/dev/null)" || {
+		echo "failed to hash generated config: $CONF" >&2
+		return 1
+	}
+	digest=${digest%% *}
+	case "$digest" in
+		????????????????????????????????????????????????????????????????) ;;
+		*)
+			echo "invalid generated config digest" >&2
+			return 1
+			;;
+	esac
+	case "$digest" in
+		*[!0-9a-f]*)
+			echo "invalid generated config digest" >&2
+			return 1
+			;;
+	esac
+
+	# Drop the cached converter version so the status page re-detects it (e.g.
+	# after the sb-sub-c binary was replaced for another architecture).
+	rm -f /var/lib/liquid-formula/converter.version 2>/dev/null
+	tz="$(uci -q get system.@system[0].timezone 2>/dev/null)"
+
+	procd_open_instance main
+	if [ "$mode" = "boot" ]; then
+		procd_set_param command "$DELAY_HELPER" "$delay" "$PROG" run -c "$CONF" -d "$WORKDIR"
+	else
+		procd_set_param command "$PROG" run -c "$CONF" -d "$WORKDIR"
+	fi
+	if [ -n "$tz" ]; then
+		procd_set_param env "TZ=$tz" "CONFIG_DIGEST=$digest"
+	else
+		procd_set_param env "CONFIG_DIGEST=$digest"
+	fi
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 30 5 5
+	procd_set_param term_timeout 5
+	procd_close_instance
+}
+
+start_service() {
+	LF_START_RC=0
+	LF_PROCD_CLOSE_RC=0
+	if ! lf_lifecycle_enter; then
+		LF_START_RC=75
+		# rc.common closes the procd service even when start_service fails. Replace
+		# the closer in this short-lived init process so a busy lifecycle lock cannot
+		# publish an empty service and stop somebody else's instance.
+		procd_close_service() { return 75; }
+		echo "another liquid-formula lifecycle operation is already running" >&2
+		return 75
+	fi
+	procd_close_service() { lf_procd_close_service "$@"; }
+	lf_start_service_locked "$@"
+	LF_START_RC=$?
+	return "$LF_START_RC"
+}
+
+service_started() {
+	local rc="$LF_START_RC"
+	[ "$rc" -ne 0 ] || rc="$LF_PROCD_CLOSE_RC"
+	lf_lifecycle_leave
+	return "$rc"
+}
+
+stop_service() {
+	LF_STOP_RC=0
+	LF_PROCD_KILL_RC=0
+	if ! lf_lifecycle_enter; then
+		LF_STOP_RC=75
+		# rc.common normally calls procd_kill regardless of stop_service's status.
+		# Suppress it in this process when the lifecycle lock belongs to another
+		# live operation.
+		procd_kill() { return 75; }
+		echo "another liquid-formula lifecycle operation is already running" >&2
+		return 75
+	fi
+	procd_kill() { lf_procd_kill "$@"; }
+	return 0
+}
+
+service_stopped() {
+	local rc="$LF_STOP_RC"
+	[ "$rc" -ne 0 ] || rc="$LF_PROCD_KILL_RC"
+	lf_lifecycle_leave
+	return "$rc"
+}
+
+restart() {
+	local stop_rc start_rc
+	lf_lifecycle_enter || {
+		echo "another liquid-formula lifecycle operation is already running" >&2
+		return 75
+	}
+	trap '' TERM
+	stop "$@"
+	stop_rc=$?
+	trap - TERM
+	start "$@"
+	start_rc=$?
+	lf_lifecycle_leave
+	[ "$start_rc" -eq 0 ] || return "$start_rc"
+	return "$stop_rc"
+}
+
+boot() {
+	start boot
+}
+
+reload_service() {
+	# rc.common publishes the newly generated, digest-keyed instance atomically.
+	# When disabled, start_service opens no instance and procd removes main.
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$CONFIG"
+}

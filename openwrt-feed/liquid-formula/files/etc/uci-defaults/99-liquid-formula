@@ -1,0 +1,72 @@
+#!/bin/sh
+
+# 1.7.0 改名迁移: singbox_formula -> liquid_formula。
+# 必须排在所有 uci 操作之前, 否则新配置会以默认值覆盖用户的既有设置。
+if [ -f /etc/config/singbox_formula ] && [ ! -f /etc/config/liquid_formula ]; then
+	cp /etc/config/singbox_formula /etc/config/liquid_formula || exit 1
+	mv /etc/config/singbox_formula /etc/config/singbox_formula.migrated || exit 1
+	logger -t liquid-formula "migrated /etc/config/singbox_formula to liquid_formula"
+fi
+
+# 旧的生成产物与运行目录改名后不再使用, 留着只会让人误判。
+[ -d /etc/singbox-formula ] && rm -rf /etc/singbox-formula 2>/dev/null
+[ -d /var/log/singbox-formula ] && rm -rf /var/log/singbox-formula 2>/dev/null
+[ -d /var/lib/singbox-formula ] && rm -rf /var/lib/singbox-formula 2>/dev/null
+[ -d /var/run/singbox-formula ] && rm -rf /var/run/singbox-formula 2>/dev/null
+if [ -x /etc/init.d/singbox-formula ]; then
+	/etc/init.d/singbox-formula stop >/dev/null 2>&1
+	/etc/init.d/singbox-formula disable >/dev/null 2>&1
+	rm -f /etc/init.d/singbox-formula
+fi
+
+mkdir -p /etc/liquid-formula /var/lib/liquid-formula/cache /var/log/liquid-formula /www/liquid-formula/templates
+
+changed=0
+
+set_if_missing() {
+	key=$1
+	value=$2
+	if ! uci -q get "$key" >/dev/null 2>&1; then
+		uci set "$key=$value" || return 1
+		changed=1
+	fi
+}
+
+# Upgrade migrations are additive. An existing value, including an explicitly
+# empty string or a value that matched an older package default, is a user choice.
+set_if_missing liquid_formula.main global || exit 1
+set_if_missing liquid_formula.main.enabled 0 || exit 1
+set_if_missing liquid_formula.main.boot_delay 90 || exit 1
+set_if_missing liquid_formula.main.port 9716 || exit 1
+set_if_missing liquid_formula.main.password 890716 || exit 1
+set_if_missing liquid_formula.main.subscription_url '' || exit 1
+set_if_missing liquid_formula.main.user_agent 'sing-box 1.11.0' || exit 1
+set_if_missing liquid_formula.main.momo_bypass_fakehttp 1 || exit 1
+set_if_missing liquid_formula.main.momo_bypass_fakesip 1 || exit 1
+set_if_missing liquid_formula.main.subscription_timeout 60 || exit 1
+set_if_missing liquid_formula.main.refresh_interval 360 || exit 1
+set_if_missing liquid_formula.main.default_template momo_template || exit 1
+set_if_missing liquid_formula.main.cache_dir /var/lib/liquid-formula/cache || exit 1
+set_if_missing liquid_formula.main.log_file /var/log/liquid-formula/server.log || exit 1
+set_if_missing liquid_formula.main.output_config /etc/momo/profiles/config.json || exit 1
+set_if_missing liquid_formula.main.template_base_url http://127.0.0.1/liquid-formula/templates || exit 1
+
+set_if_missing liquid_formula.momo_template template || exit 1
+set_if_missing liquid_formula.momo_template.enabled 1 || exit 1
+set_if_missing liquid_formula.momo_template.name 'Momo Template' || exit 1
+set_if_missing liquid_formula.momo_template.file momo-template.json || exit 1
+set_if_missing liquid_formula.momo_template.no_node '➜ Direct' || exit 1
+
+if [ "$changed" = "1" ]; then
+	uci commit liquid_formula || exit 1
+fi
+
+if [ -x /etc/init.d/liquid-formula ]; then
+	/etc/init.d/liquid-formula enable >/dev/null 2>&1 || exit 1
+fi
+
+if [ -x /usr/share/liquid-formula/generate-config.sh ]; then
+	/usr/share/liquid-formula/generate-config.sh >/dev/null 2>&1 || exit 1
+fi
+
+exit 0

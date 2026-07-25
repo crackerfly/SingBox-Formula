@@ -1,0 +1,87 @@
+#!/bin/sh
+
+# Keep NFQUEUE bindings in sync with WAN link changes. Hotplug scripts are
+# sourced by netifd, so this file deliberately falls through without exit.
+
+tf_common="${LFDPI_COMMON:-/usr/share/liquid-formula-dpi/service-common.sh}"
+tf_network_helpers="${LFDPI_NETWORK_HELPERS:-/lib/functions/network.sh}"
+tf_init_dir="${LFDPI_INIT_DIR:-/etc/init.d}"
+
+tf_hotplug_log() {
+	logger -t liquid-formula-hotplug -- "$*" 2>/dev/null || true
+}
+
+tf_hotplug_device() {
+	local resolved=''
+
+	if [ -n "${DEVICE:-}" ]; then
+		printf '%s\n' "$DEVICE"
+		return 0
+	fi
+	[ -n "${INTERFACE:-}" ] || return 1
+	if command -v network_get_device >/dev/null 2>&1; then
+		command -v network_flush_cache >/dev/null 2>&1 && network_flush_cache
+		network_get_device resolved "$INTERFACE" 2>/dev/null || resolved=''
+	fi
+	if [ -z "$resolved" ]; then
+		resolved="$(tf_hotplug_device_cache_get "$INTERFACE" 2>/dev/null || true)"
+	fi
+	[ -n "$resolved" ] || return 1
+	printf '%s\n' "$resolved"
+}
+
+tf_hotplug_main() {
+	local tf_command tf_device tf_service tf_mode tf_matched tf_iface
+
+	case "${ACTION:-}" in
+		ifdown) tf_command=link_down ;;
+		ifup) tf_command=link_up ;;
+		*) return 0 ;;
+	esac
+
+	[ -r "$tf_common" ] || {
+		tf_hotplug_log "shared service helper is unavailable"
+		return 0
+	}
+	# shellcheck source=/dev/null
+	. "$tf_common"
+	if [ -r "$tf_network_helpers" ]; then
+		# shellcheck source=/dev/null
+		. "$tf_network_helpers"
+	fi
+
+	tf_device="$(tf_hotplug_device 2>/dev/null || true)"
+	if ! tf_valid_interface "$tf_device"; then
+		tf_hotplug_log "ignoring ${ACTION:-unknown} without a uniquely resolved device"
+		return 0
+	fi
+	if [ "$tf_command" = link_up ] && ! tf_interface_exists "$tf_device"; then
+		tf_hotplug_log "ignoring ifup for unavailable device: $tf_device"
+		return 0
+	fi
+	if [ "$tf_command" = link_up ] && [ -n "${INTERFACE:-}" ]; then
+		tf_hotplug_device_cache_set "$INTERFACE" "$tf_device" ||
+			tf_hotplug_log "unable to cache ${INTERFACE} L3 device: $tf_device"
+	fi
+
+	for tf_service in fakehttp fakesip; do
+		[ -x "$tf_init_dir/$tf_service" ] || continue
+		[ "$(uci -q get "$tf_service.main.enabled" 2>/dev/null)" = 1 ] || continue
+
+		tf_matched=0
+		tf_mode="$(uci -q get "$tf_service.main.interface_mode" 2>/dev/null)"
+		if [ "$tf_service" = fakehttp ] && [ "$tf_mode" = all ]; then
+			tf_matched=1
+		else
+			for tf_iface in $(uci -q get "$tf_service.main.interface" 2>/dev/null); do
+				[ "$tf_iface" = "$tf_device" ] && tf_matched=1
+			done
+		fi
+
+		[ "$tf_matched" = 1 ] || continue
+		"$tf_init_dir/$tf_service" "$tf_command" "$tf_device" >/dev/null 2>&1 || true
+	done
+}
+
+tf_hotplug_main
+unset tf_common tf_network_helpers tf_init_dir

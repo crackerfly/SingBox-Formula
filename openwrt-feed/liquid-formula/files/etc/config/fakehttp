@@ -1,0 +1,20 @@
+config fakehttp 'main'
+	option enabled '0'
+	option boot_delay '60'
+	# Filled with the current default-route device by uci-defaults when known.
+	option interface_mode 'selected'
+	option direction 'outbound'
+	option family 'dual'
+	option repeat '2'
+	option ttl '3'
+	option hop_estimation '1'
+	option dynamic_ttl_pct '0'
+	option log_connections '0'
+	option queue_num '8970'
+	option fwmark '0x8000'
+	option fwmask '0x8000'
+
+config payload
+	option enabled '1'
+	option type 'http'
+	option host 'www.speedtest.net'

@@ -1,0 +1,371 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+PROG="/usr/bin/fakesip"
+COMMON="/usr/share/liquid-formula-dpi/service-common.sh"
+SERVICE_NAME=fakesip
+DEFAULT_BOOT_DELAY=40
+EXTRA_COMMANDS="link_down link_up boot_expired"
+EXTRA_HELP="
+	link_down DEVICE     Stop for a matching link-down event
+	link_up DEVICE       Resume for a matching link-up event
+	boot_expired TOKEN DEADLINE  Complete a supervised boot wait"
+
+. "$COMMON"
+
+fs_error() {
+	logger -t fakesip -- "$*"
+}
+
+fs_validate_interface() {
+	local iface="$1"
+
+	[ -n "$iface" ] || return 0
+	if ! tf_valid_interface "$iface" || ! tf_interface_exists "$iface"; then
+		fs_error "invalid or unavailable network interface: $iface"
+		FS_VALID=0
+		return 0
+	fi
+	case " $FS_INTERFACES " in *" $iface "*) return 0 ;; esac
+	FS_INTERFACES="${FS_INTERFACES:+$FS_INTERFACES }$iface"
+	FS_INTERFACE_COUNT=$((FS_INTERFACE_COUNT + 1))
+}
+
+fs_validate_config() {
+	local interface_mode direction family port_mode ports payload_mode sip_uri repeat ttl
+	local hop_estimation dynamic_ttl_pct log_connections queue_num sibling_queue fwmark fwmask
+
+	FS_VALID=1
+	FS_INTERFACE_COUNT=0
+	FS_INTERFACES=''
+	config_get interface_mode main interface_mode 'selected'
+	if [ "$interface_mode" != "selected" ]; then
+		fs_error "FakeSIP only permits explicitly selected interfaces"
+		FS_VALID=0
+	fi
+	config_list_foreach main interface fs_validate_interface
+	if [ "$FS_INTERFACE_COUNT" -eq 0 ]; then
+		fs_error "select at least one existing Internet-facing interface"
+		FS_VALID=0
+	fi
+
+	config_get direction main direction 'outbound'
+	case "$direction" in inbound|outbound|both) ;; *) fs_error "invalid direction"; FS_VALID=0 ;; esac
+	config_get family main family 'dual'
+	case "$family" in
+		ipv4|ipv6|dual) ;;
+		*) fs_error "invalid address family"; FS_VALID=0 ;;
+	esac
+
+	config_get port_mode main port_mode 'exclude'
+	config_get ports main ports '53'
+	case "$port_mode" in
+		include|exclude)
+			tf_valid_port_spec "$ports" || { fs_error "invalid UDP port specification"; FS_VALID=0; }
+			;;
+		all) ;;
+		*) fs_error "invalid port filter mode"; FS_VALID=0 ;;
+	esac
+
+	config_get payload_mode main payload_mode 'auto'
+	config_get sip_uri main sip_uri ''
+	case "$payload_mode" in
+		auto) ;;
+		custom_uri) tf_valid_sip_uri "$sip_uri" || { fs_error "invalid custom SIP URI"; FS_VALID=0; } ;;
+		*) fs_error "invalid SIP URI mode"; FS_VALID=0 ;;
+	esac
+
+	config_get repeat main repeat '2'
+	tf_valid_uint_range "$repeat" 1 10 || { fs_error "repeat must be 1-10"; FS_VALID=0; }
+	config_get ttl main ttl '3'
+	tf_valid_uint_range "$ttl" 1 255 || { fs_error "TTL must be 1-255"; FS_VALID=0; }
+	config_get_bool hop_estimation main hop_estimation 1
+	config_get dynamic_ttl_pct main dynamic_ttl_pct '0'
+	case "$dynamic_ttl_pct" in
+		0) ;;
+		*) tf_valid_uint_range "$dynamic_ttl_pct" 1 99 || { fs_error "dynamic TTL percentage must be 0-99"; FS_VALID=0; } ;;
+	esac
+	if [ "$hop_estimation" != "1" ] && [ "$dynamic_ttl_pct" != "0" ]; then
+		fs_error "dynamic TTL requires hop estimation"
+		FS_VALID=0
+	fi
+	config_get queue_num main queue_num '8971'
+	tf_valid_uint_range "$queue_num" 1 65535 || { fs_error "NFQUEUE number must be 1-65535"; FS_VALID=0; }
+	if [ "$(uci -q get fakehttp.main.enabled)" = "1" ]; then
+		sibling_queue="$(uci -q get fakehttp.main.queue_num)"
+		if tf_valid_uint_range "$queue_num" 1 65535 &&
+		   tf_valid_uint_range "$sibling_queue" 1 65535 &&
+		   [ "$queue_num" -eq "$sibling_queue" ]; then
+			fs_error "NFQUEUE $queue_num is already assigned to enabled FakeHTTP"
+			FS_VALID=0
+		fi
+	fi
+	config_get fwmark main fwmark '0x10000'
+	config_get fwmask main fwmask '0x10000'
+	tf_valid_u32 "$fwmark" || { fs_error "invalid fwmark"; FS_VALID=0; }
+	tf_valid_u32 "$fwmask" || { fs_error "invalid fwmark mask"; FS_VALID=0; }
+	if tf_valid_u32 "$fwmark" && tf_valid_u32 "$fwmask"; then
+		tf_mark_fits_mask "$fwmark" "$fwmask" || { fs_error "fwmark must fit inside its mask"; FS_VALID=0; }
+	fi
+	config_get_bool log_connections main log_connections 0
+	case "$log_connections:$hop_estimation" in
+		0:0|0:1|1:0|1:1) ;;
+		*) fs_error "invalid boolean option"; FS_VALID=0 ;;
+	esac
+
+	[ "$FS_VALID" = "1" ]
+}
+
+fs_append_interface() {
+	local iface="$1"
+
+	[ -n "$iface" ] || return 0
+	case " $FS_APPENDED_INTERFACES " in *" $iface "*) return 0 ;; esac
+	FS_APPENDED_INTERFACES="${FS_APPENDED_INTERFACES:+$FS_APPENDED_INTERFACES }$iface"
+	procd_append_param command -i "$iface"
+	procd_append_param netdev "$iface"
+}
+
+fs_match_event_interface() {
+	[ "$1" = "$FS_EVENT_DEVICE" ] && FS_EVENT_MATCH=1
+}
+
+fs_event_device_matches() {
+	local device="$1" enabled interface_mode
+
+	config_load fakesip
+	config_get_bool enabled main enabled 0
+	[ "$enabled" = 1 ] || return 1
+	config_get interface_mode main interface_mode selected
+	[ "$interface_mode" = selected ] || return 1
+	FS_EVENT_DEVICE="$device"
+	FS_EVENT_MATCH=0
+	config_list_foreach main interface fs_match_event_interface
+	[ "$FS_EVENT_MATCH" = 1 ]
+}
+
+fs_start_service_locked() {
+	local enabled direction family port_mode ports payload_mode sip_uri repeat ttl
+	local hop_estimation dynamic_ttl_pct log_connections queue_num fwmark fwmask
+	local context boot_delay token deadline state
+
+	config_load fakesip
+	config_get_bool enabled main enabled 0
+	context="${LFDPI_SERVICE_CONTEXT:-}"
+	if [ -z "$context" ]; then
+		case "${action:-start}" in
+			boot) context=boot ;;
+			*) context=manual ;;
+		esac
+	fi
+
+	case "$context" in
+		ifdown-definition)
+			return 0
+			;;
+		manual)
+			if [ "$enabled" = 1 ]; then
+				tf_boot_state_set "$SERVICE_NAME" manual manual 0 || return 1
+			else
+				tf_boot_state_set "$SERVICE_NAME" cancel disabled 0 || return 1
+				( procd_kill "$SERVICE_NAME" ) >/dev/null 2>&1 || true
+				tf_cleanup_firewall_state "$SERVICE_NAME"
+				return 0
+			fi
+			;;
+		boot-expired)
+			token="${LFDPI_BOOT_TOKEN:-}"
+			deadline="${LFDPI_BOOT_DEADLINE:-}"
+			tf_boot_token_valid "$token" || return 1
+			tf_valid_uint_range "$deadline" 0 600 || return 1
+			tf_boot_state_is "$SERVICE_NAME" wait "$token" "$deadline" || return 0
+			if [ "$enabled" != 1 ]; then
+				tf_boot_state_set "$SERVICE_NAME" cancel disabled 0 || return 1
+				return 0
+			fi
+			tf_boot_state_set "$SERVICE_NAME" done "$token" "$deadline" || return 1
+			tf_link_state_is_down "$SERVICE_NAME" && return 0
+			;;
+		boot|auto|ifup)
+			config_get boot_delay main boot_delay "$DEFAULT_BOOT_DELAY"
+			boot_delay="$(tf_boot_delay_value "$boot_delay" "$DEFAULT_BOOT_DELAY")" || return 1
+			if [ "$enabled" != 1 ]; then
+				tf_boot_state_set "$SERVICE_NAME" cancel disabled 0 || return 1
+				( procd_kill "$SERVICE_NAME" ) >/dev/null 2>&1 || true
+				tf_cleanup_firewall_state "$SERVICE_NAME"
+				return 0
+			fi
+			tf_boot_should_defer "$SERVICE_NAME" "$boot_delay" && return 0
+			state="$(tf_boot_state_get "$SERVICE_NAME" 2>/dev/null || true)"
+			case "$state" in
+				manual\ *|done\ *) ;;
+				*) tf_boot_state_set "$SERVICE_NAME" done automatic "$boot_delay" || return 1 ;;
+			esac
+			;;
+		*)
+			return 1
+			;;
+	esac
+
+	# Isolate procd_kill's json_init/json_cleanup in a child so the parent's
+	# in-progress rc_procd definition remains intact.
+	( procd_kill "$SERVICE_NAME" ) >/dev/null 2>&1 || true
+	tf_cleanup_firewall_state "$SERVICE_NAME"
+	[ -x "$PROG" ] || { fs_error "binary is missing or not executable: $PROG"; return 1; }
+	fs_validate_config || return 1
+
+	config_get direction main direction 'outbound'
+	config_get family main family 'dual'
+	config_get port_mode main port_mode 'exclude'
+	config_get ports main ports '53'
+	config_get payload_mode main payload_mode 'auto'
+	config_get sip_uri main sip_uri ''
+	config_get repeat main repeat '2'
+	config_get ttl main ttl '3'
+	config_get_bool hop_estimation main hop_estimation 1
+	config_get dynamic_ttl_pct main dynamic_ttl_pct '0'
+	config_get_bool log_connections main log_connections 0
+	config_get queue_num main queue_num '8971'
+	config_get fwmark main fwmark '0x10000'
+	config_get fwmask main fwmask '0x10000'
+
+	procd_open_instance fakesip
+	procd_set_param command "$PROG"
+	FS_APPENDED_INTERFACES=''
+	config_list_foreach main interface fs_append_interface
+	# The Droid-MAX baseline retained by FakeSIP 0.9.5 checks PACKET_HOST against
+	# `outbound` and
+	# PACKET_OUTGOING against `inbound`. Compensate for that upstream inversion
+	# so the UCI/LuCI direction retains its router-facing meaning.
+	case "$direction" in
+		inbound) procd_append_param command -1 ;;
+		outbound) procd_append_param command -0 ;;
+		both) procd_append_param command -0 -1 ;;
+	esac
+	case "$family" in
+		ipv4) procd_append_param command -4 ;;
+		ipv6) procd_append_param command -6 ;;
+		dual) procd_append_param command -4 -6 ;;
+	esac
+	case "$port_mode" in
+		include) procd_append_param command -p "$ports" ;;
+		exclude) procd_append_param command -P "$ports" ;;
+	esac
+	[ "$payload_mode" = "custom_uri" ] && procd_append_param command -u "$sip_uri"
+	procd_append_param command -r "$repeat" -t "$ttl" -n "$queue_num" -m "$fwmark" -x "$fwmask"
+	[ "$hop_estimation" = "1" ] || procd_append_param command -g
+	[ "$dynamic_ttl_pct" = "0" ] || procd_append_param command -y "$dynamic_ttl_pct"
+	[ "$log_connections" = "1" ] || procd_append_param command -s
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 5
+	procd_set_param term_timeout 5
+	procd_close_instance
+}
+
+start_service() {
+	local result=0
+
+	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+	fs_start_service_locked || result=$?
+	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+	return "$result"
+}
+
+link_down() {
+	local device="${1:-}" result=0
+
+	tf_valid_interface "$device" || { fs_error "invalid link-down device"; return 1; }
+	procd_lock
+	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+	if ! fs_event_device_matches "$device"; then
+		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+		return 0
+	fi
+	tf_link_state_set "$SERVICE_NAME" down || result=$?
+	if [ "$result" -eq 0 ]; then
+		procd_kill "$SERVICE_NAME" >/dev/null 2>&1 || true
+		tf_cleanup_firewall_state "$SERVICE_NAME"
+		LFDPI_SERVICE_CONTEXT=ifdown-definition start || result=$?
+	fi
+	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+	return "$result"
+}
+
+link_up() {
+	local device="${1:-}" result=0
+
+	tf_valid_interface "$device" || {
+		fs_error "invalid or unavailable link-up device: $device"
+		return 1
+	}
+	procd_lock
+	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+	if ! tf_interface_exists "$device" || ! fs_event_device_matches "$device"; then
+		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+		return 0
+	fi
+	tf_link_state_set "$SERVICE_NAME" up || result=$?
+	if [ "$result" -eq 0 ]; then
+		procd_kill "$SERVICE_NAME" >/dev/null 2>&1 || true
+		tf_cleanup_firewall_state "$SERVICE_NAME"
+		LFDPI_SERVICE_CONTEXT=ifup start || result=$?
+	fi
+	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+	return "$result"
+}
+
+boot_expired() {
+	local token="${1:-}" deadline="${2:-}" result=0
+
+	tf_boot_token_valid "$token" || return 1
+	tf_valid_uint_range "$deadline" 0 600 || return 1
+	procd_lock
+	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+	if ! tf_boot_state_is "$SERVICE_NAME" wait "$token" "$deadline"; then
+		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+		return 0
+	fi
+	LFDPI_SERVICE_CONTEXT=boot-expired \
+		LFDPI_BOOT_TOKEN="$token" \
+		LFDPI_BOOT_DEADLINE="$deadline" \
+		start || result=$?
+	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+	return "$result"
+}
+
+reload_service() {
+	local result=0
+
+	procd_lock
+	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+	procd_kill "$SERVICE_NAME" >/dev/null 2>&1 || true
+	tf_cleanup_firewall_state "$SERVICE_NAME"
+	LFDPI_SERVICE_CONTEXT=manual start || result=$?
+	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
+	return "$result"
+}
+
+stop_service() {
+	case "${action:-stop}" in
+		stop|shutdown|restart)
+			tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
+			tf_boot_state_set "$SERVICE_NAME" cancel explicit-stop 0 || {
+				tf_lifecycle_lock_release "$SERVICE_NAME" || true
+				return 1
+			}
+			tf_lifecycle_lock_release "$SERVICE_NAME"
+			;;
+	esac
+}
+
+service_triggers() {
+	procd_add_reload_trigger "fakesip"
+}
+
+service_stopped() {
+	tf_cleanup_firewall_state "$SERVICE_NAME"
+}

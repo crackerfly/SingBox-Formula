@@ -1,0 +1,105 @@
+#!/bin/sh
+
+# liquid-formula-dpi 的安装后初始化。
+#
+# 只做「新装即可用」所需的最小集合: 探测 WAN 接口、补齐默认值、启用并拉起
+# 服务。luci-app-taoistfuchen 1.x -> 2.x 的历史迁移没有搬过来, 因为本包是
+# 全新命名空间, 不存在 1.x 安装基。
+
+set_default() {
+	local package="$1" section="$2" option="$3" value="$4"
+	[ -n "$(uci -q get "$package.$section.$option")" ] || \
+		uci -q set "$package.$section.$option=$value"
+}
+
+# --- 从 luci-app-taoistfuchen 迁移 -------------------------------------------
+# payload 目录换到新命名空间。用户放进去的 .bin 必须跟着搬, 否则界面里已选
+# 中的 payload 会指向不存在的文件。
+if [ -d /etc/taoistfuchen/fakehttp-payloads ] && [ ! -d /etc/liquid-formula/fakehttp-payloads ]; then
+	mkdir -p /etc/liquid-formula || exit 1
+	mv /etc/taoistfuchen/fakehttp-payloads /etc/liquid-formula/fakehttp-payloads || exit 1
+	logger -t liquid-formula-dpi "migrated fakehttp payload directory"
+fi
+
+# 旧包的调度器不能与新包并存: 两者会抢同一份 nft 表和同一个生命周期锁。
+if [ -x /etc/init.d/taoistfuchen-boot-delay ]; then
+	/etc/init.d/taoistfuchen-boot-delay stop >/dev/null 2>&1
+	/etc/init.d/taoistfuchen-boot-delay disable >/dev/null 2>&1
+	rm -f /etc/init.d/taoistfuchen-boot-delay
+fi
+
+# payload 是原样注入网络的字节, 不该让非 root 读写。
+mkdir -p /etc/liquid-formula/fakehttp-payloads || exit 1
+chmod 0700 /etc/liquid-formula/fakehttp-payloads 2>/dev/null || true
+
+# --- 接口探测 ----------------------------------------------------------------
+# 绑定默认路由所在的设备。缺了这一步 interface 为空, 两个服务会拒绝启动,
+# 新装用户会看到一个「已启用但没运行」的界面。
+wan_dev="$(awk '$2 == "00000000" { print $1; exit }' /proc/net/route 2>/dev/null)"
+if [ -n "$wan_dev" ]; then
+	[ -n "$(uci -q get fakehttp.main.interface)" ] || \
+		uci -q add_list "fakehttp.main.interface=$wan_dev"
+	[ -n "$(uci -q get fakesip.main.interface)" ] || \
+		uci -q add_list "fakesip.main.interface=$wan_dev"
+fi
+
+# --- FakeHTTP 默认值 ---------------------------------------------------------
+set_default fakehttp main interface_mode selected
+set_default fakehttp main direction outbound
+set_default fakehttp main family dual
+set_default fakehttp main log_connections 0
+set_default fakehttp main repeat 2
+set_default fakehttp main ttl 3
+set_default fakehttp main hop_estimation 1
+set_default fakehttp main dynamic_ttl_pct 0
+set_default fakehttp main queue_num 8970
+set_default fakehttp main fwmark 0x8000
+set_default fakehttp main fwmask 0x8000
+
+# 至少要有一条 payload, 否则没有可注入的内容。
+if ! uci -q show fakehttp | grep -q '=payload$'; then
+	hostname="$(uci -q get fakehttp.main.hostname)"
+	[ -n "$hostname" ] || hostname="www.speedtest.net"
+	payload="$(uci -q add fakehttp payload)"
+	uci -q set "fakehttp.$payload.enabled=1"
+	uci -q set "fakehttp.$payload.type=http"
+	uci -q set "fakehttp.$payload.host=$hostname"
+fi
+uci -q delete fakehttp.main.hostname 2>/dev/null || true
+
+# --- FakeSIP 默认值 ----------------------------------------------------------
+set_default fakesip main interface_mode selected
+set_default fakesip main direction outbound
+set_default fakesip main family dual
+# 默认排除 53: 混淆 DNS 会给每次查询多加一个 RTT, 收益小于代价。
+set_default fakesip main port_mode exclude
+set_default fakesip main ports 53
+set_default fakesip main payload_mode auto
+set_default fakesip main repeat 2
+set_default fakesip main ttl 3
+set_default fakesip main hop_estimation 1
+set_default fakesip main dynamic_ttl_pct 0
+set_default fakesip main log_connections 0
+set_default fakesip main queue_num 8971
+set_default fakesip main fwmark 0x10000
+set_default fakesip main fwmask 0x10000
+
+uci -q commit fakehttp
+uci -q commit fakesip
+
+# --- 启用并拉起 --------------------------------------------------------------
+# 调度器必须先于两个数据包服务启动, 这样两个开机延迟是并行计时而不是串行。
+for service in liquid-formula-boot-delay fakehttp fakesip; do
+	[ -x "/etc/init.d/$service" ] || continue
+	/etc/init.d/$service enable >/dev/null 2>&1 || true
+done
+
+[ ! -x /etc/init.d/liquid-formula-boot-delay ] || \
+	/etc/init.d/liquid-formula-boot-delay start >/dev/null 2>&1 || true
+
+for service in fakehttp fakesip; do
+	[ -x "/etc/init.d/$service" ] || continue
+	LFDPI_SERVICE_CONTEXT=auto "/etc/init.d/$service" start >/dev/null 2>&1 || true
+done
+
+exit 0
