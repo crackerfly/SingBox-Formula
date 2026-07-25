@@ -1,0 +1,66 @@
+# 服务器配置
+server:
+  port: 9000
+  read_timeout: 15  # 秒
+  write_timeout: 90 # 秒; must exceed subscription.timeout
+  idle_timeout: 60  # 秒
+
+# 认证配置
+auth:
+  password: "your_default_password"
+
+# 节点订阅
+subscription:
+  url: "https://raw.githubusercontent.com/haierkeys/free-network-tool/master/singbox/node-example.json"
+  timeout: 30  # 秒
+  refresh_interval: 2  # 分钟
+
+# 模板列表
+templates:
+  # 模板1：默认配置 OpenWRT
+  default:
+    url: "https://raw.githubusercontent.com/haierkeys/free-network-tool/master/singbox/1.12.json"
+    name: "OpenWRT"
+    no_node: "🎯 全球直连"
+    enabled: true
+
+  # 模板2：ios 1.11
+  ios:
+    url: "https://raw.githubusercontent.com/haierkeys/free-network-tool/master/singbox/1.11-ios.json"
+    name: "iOS"
+    no_node: "🎯 全球直连"
+    enabled: true
+
+  # 模板3：ios 1.13
+  1.13-ios:
+    url: "https://raw.githubusercontent.com/haierkeys/free-network-tool/master/singbox/1.13-ios.json"
+    name: "iOS 1.13"
+    no_node: "🎯 全球直连"
+    enabled: true
+    update_interval: 3600
+
+# 默认模板
+default_template: "default"
+
+# 缓存配置
+cache:
+  directory: "./storage/cache"
+  node_file: "node.json"
+  template_file: "template.json"
+
+# Cloudflare 配置
+cloudflare:
+  enabled: false  # 是否启用 Cloudflare 缓存清理
+  purge_url: ""   # Cloudflare 缓存清理 API 地址 (例如: https://api.cloudflare.com/client/v4/zones/YOUR_ZONE_ID/purge_cache)
+  api_token: ""   # Cloudflare API Token (推荐) - 在 Cloudflare 控制台创建
+  api_key: ""     # Cloudflare API Key (可选) - 与 api_email 一起使用
+  api_email: ""   # Cloudflare 账户邮箱 (可选) - 与 api_key 一起使用
+
+# 日志配置
+logging:
+  production: true
+  file: "./storage/log/server.log"
+  level: "info"  # debug, info, warn, error
+  max_size: 10   # MB
+  max_backups: 3
+  max_age: 7     # 天
