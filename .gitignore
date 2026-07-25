@@ -23,5 +23,5 @@ SHA256SUMS
 .worktrees/
 
 # Local binaries produced while testing the vendored converter
-openwrt-feed/singbox-formula/src/singbox-subscribe-convert
-openwrt-feed/singbox-formula/src/sb-sub-c
+openwrt-feed/liquid-formula/src/singbox-subscribe-convert
+openwrt-feed/liquid-formula/src/sb-sub-c
