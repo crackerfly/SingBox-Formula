@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version Number
+        type: string
+        required: false
+
+jobs:
+  Lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+      - name: Run clang-format
+        run: |
+          clang-format --dry-run --Werror src/*.c include/*.h
+
+  Build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      cross_dir: /opt/x-tools
+    strategy:
+      matrix:
+        include:
+          - name: arm64
+            triplet: aarch64-unknown-linux-musl
+            sha256: 76f0d71893f3864e91ad09feff71a719cdf94cccd4f14cc25d7deed395968b5b
+          - name: arm32
+            triplet: arm-unknown-linux-musleabi
+            sha256: 1242b2a965480415ce90a710ab7600730a8de114f5bc5452ed7382e64839b5de
+          - name: arm32hf
+            triplet: arm-unknown-linux-musleabihf
+            sha256: 6e6f20cebd75ca5319c5dfb00fdd50a4ceb22af2df9073a75cafbdd3204eebad
+          - name: arm32v7
+            triplet: armv7-unknown-linux-musleabi
+            sha256: 158d8fd651d8c501d8dea4bb82a152208732cb10a5f72e7e8e4ce9f551e8d165
+          - name: arm32v7hf
+            triplet: armv7-unknown-linux-musleabihf
+            sha256: 7643420285f038545997d3234bee9c854900fa9060388769442ed20a72aeac23
+          - name: i586
+            triplet: i586-unknown-linux-musl
+            sha256: 37d494c1fe60ac07ab8b83871a77a63ab885e5b06cceaa0777537db7767c464f
+          - name: i686
+            triplet: i686-unknown-linux-musl
+            sha256: 0b1baac45c94b499791b65bbc63d0486aa557c6576142eddce3dee55e2fd022b
+          - name: loong64
+            triplet: loongarch64-unknown-linux-musl
+            sha256: 2b8cddf9e082f8c8527a459520037ebcedae7262950e429d96184622ae74b8cf
+          - name: m68k
+            triplet: m68k-unknown-linux-musl
+            sha256: 72f6427a1c97c1bd151ebcbd98eab6c39d46090bb89ff2e40c639be012dd2855
+          - name: microblazeel
+            triplet: microblazeel-xilinx-linux-musl
+            sha256: ce892fe2c799bfd963de06632f5d02ea3e78d8abf2bfd361d673d4ce28fb6f69
+          - name: microblaze
+            triplet: microblaze-xilinx-linux-musl
+            sha256: 03852d0ba1a5d6cd3efe1ee5b1cb7506fcc2b5b3026966fe1d7d916d621f5b4b
+          - name: mips64el
+            triplet: mips64el-unknown-linux-musl
+            sha256: 01f821f8c476ec6e9618c4272a2e7e6fa3d664491f5ede4296d33af2e423a5ca
+          - name: mips64
+            triplet: mips64-unknown-linux-musl
+            sha256: 9a99beb2e08584373451321d4580ff9c6fe3e1899daab511d2822d547e1a78be
+          - name: mips32el
+            triplet: mipsel-unknown-linux-musl
+            sha256: 2698fea97c0c8bfdbcfa5db3fead20f779411ab1222e571b966a823a9f27356d
+          - name: mips32elsf
+            triplet: mipsel-unknown-linux-muslsf
+            sha256: 36d8b864b3f6d27558d3f19695a4a39b79a873086edc60bebf733777df2b8359
+          - name: mips32
+            triplet: mips-unknown-linux-musl
+            sha256: b74b51d0f61a837f235ec2cecc7b112c1ed53ad8046c88b907a63b4fdf93d4f3
+          - name: mips32sf
+            triplet: mips-unknown-linux-muslsf
+            sha256: cc87dcaeed29f970bddb4b572c40a4074b9ac3997ba254725e8a89e05485538a
+          - name: powerpc64
+            triplet: powerpc64-unknown-linux-musl
+            sha256: d3cce7238b4e2bfaf0ae5a47d4390b84616ad8ae848a07809fe293f436444ee8
+          - name: powerpc
+            triplet: powerpc-unknown-linux-musl
+            sha256: aa50fe4bd9de4e1616400086ec5a29eded5bfbbb9b974b44e990ede3554ffc9e
+          - name: riscv32
+            triplet: riscv32-unknown-linux-musl
+            sha256: ebac6326d6a0cd77c03a9813e6cf63ce70d3d46381149a82cafb60563d9c4732
+          - name: riscv64
+            triplet: riscv64-unknown-linux-musl
+            sha256: 552361f25eaef471d88032eab89e7c1642ddfee466556f1f2e0f6eb68453b7a1
+          - name: s390x
+            triplet: s390x-ibm-linux-musl
+            sha256: d48e0465117ecdba93db01feffd7133bdc975b5dd859e388a8bf7937a9b68d36
+          - name: sh4
+            triplet: sh4-multilib-linux-musl
+            sha256: 6d1cb6c64e71773c4fe68b4a5d774e596ac3d58813b5c1365529b34be08ff309
+          - name: x86_64
+            triplet: x86_64-unknown-linux-musl
+            sha256: a896bad67a4dae7cd7baece62d537fda07f8c74e65fee1b450a691b83e151a9c
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Set up toolchain for ${{ matrix.name }}
+        run: |
+          CROSS_TOOLCHAIN_URL="https://github.com/cross-tools/musl-cross/releases/download/20250520/${{ matrix.triplet }}.tar.xz"
+
+          sudo mkdir -m 777 -p "${{ env.cross_dir }}"
+          env \
+              CROSS_TRIPLET="${{ matrix.triplet }}" \
+              CROSS_TOOLCHAIN_URL="$CROSS_TOOLCHAIN_URL" \
+              CROSS_TOOLCHAIN_SHA256="${{ matrix.sha256 }}" \
+              CROSS_DIR="${{ env.cross_dir }}" \
+              .github/workflows/scripts/cross-setup.sh
+      - name: Build for ${{ matrix.name }}
+        run: |
+          CROSS_PREFIX="${{ env.cross_dir }}/${{ matrix.triplet }}/bin/${{ matrix.triplet }}-"
+          VERSION="${{ inputs.version }}"
+
+          if [ -n "$VERSION" ]; then
+              make -j$(nproc) CFLAGS="-Werror" STATIC=1 CROSS_PREFIX="$CROSS_PREFIX" VERSION="$VERSION"
+          else
+              make -j$(nproc) CFLAGS="-Werror" STATIC=1 CROSS_PREFIX="$CROSS_PREFIX"
+          fi
+      - name: Upload ${{ matrix.name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakehttp-linux-${{ matrix.name }}
+          path: build/fakehttp
+          if-no-files-found: error
