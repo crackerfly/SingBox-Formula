@@ -86,6 +86,48 @@ assert_contains "$workflow" \
 assert_contains "$workflow" 'queue: max' \
 	"concurrent web uploads and releases queue instead of replacing pending runs"
 
+oldest_go_step=$(awk '
+	/^      - name: Set up the oldest supported Go toolchain$/ {
+		in_step=1
+		print
+		next
+	}
+	in_step && /^      - / {
+		exit
+	}
+	in_step {
+		print
+	}
+' "$workflow")
+
+if printf '%s\n' "$oldest_go_step" |
+	grep -Eq '^[[:space:]]+uses:[[:space:]]+actions/setup-go@v6[[:space:]]*$'; then
+	pass "the oldest-toolchain step uses setup-go v6"
+else
+	fail "the oldest-toolchain step must use setup-go v6"
+fi
+
+if printf '%s\n' "$oldest_go_step" |
+	grep -Eq "^[[:space:]]+go-version:[[:space:]]+'1\\.23\\.12'[[:space:]]*$"; then
+	pass "the non-caching setup selects the OpenWrt 24.10 Go toolchain"
+else
+	fail "the non-caching setup must select Go 1.23.12"
+fi
+
+if printf '%s\n' "$oldest_go_step" |
+	grep -Eq '^[[:space:]]+cache:[[:space:]]+false[[:space:]]*$'; then
+	pass "the second Go setup does not restore over the populated test cache"
+else
+	fail "the second Go setup must disable its duplicate cache restore"
+fi
+
+if printf '%s\n' "$oldest_go_step" |
+	grep -Eq '^[[:space:]]+cache-dependency-path:'; then
+	fail "the non-caching Go 1.23 setup must not declare a cache dependency path"
+else
+	pass "the non-caching Go 1.23 setup has no stale cache dependency input"
+fi
+
 mkdir -p "$test_tmp/bin" "$test_tmp/assets"
 printf 'package\n' > "$test_tmp/assets/liquid-formula_${pkg_version}_test.ipk"
 printf 'notes\n' > "$test_tmp/NOTES.md"
