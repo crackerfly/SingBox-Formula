@@ -14,6 +14,7 @@ tests/dpi/test_service_common.sh
 tests/dpi/test_boot_delay.sh
 tests/dpi/test_service_commands.sh
 tests/dpi/test_hotplug.sh
+tests/dpi/test_wan_resolver.sh
 tests/dpi/test_upload.sh
 tests/dpi/test_theme_runtime.sh
 tests/dpi/test_firewall_cleanup.sh
@@ -27,11 +28,13 @@ openwrt-feed/liquid-formula/files/etc/init.d/liquid-formula-boot-delay
 openwrt-feed/liquid-formula/files/etc/hotplug.d/iface/99-liquid-formula-dpi
 openwrt-feed/liquid-formula/files/etc/uci-defaults/99-liquid-formula-dpi
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula-dpi/boot-delay-runner.sh
+openwrt-feed/liquid-formula/files/usr/share/liquid-formula-dpi/wan-resolver.sh
 openwrt-feed/luci-app-liquid-formula/root/usr/libexec/rpcd/liquid_formula
 openwrt-feed/liquid-formula/files/etc/init.d/liquid-formula
 openwrt-feed/liquid-formula/files/etc/uci-defaults/99-liquid-formula
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/generate-config.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/run-delayed.sh
+openwrt-feed/liquid-formula/files/usr/share/liquid-formula/wait-subscription-gateway.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/update.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/validate-template.sh
 tests/shell/test_generate_config.sh
@@ -39,7 +42,9 @@ tests/shell/test_migration.sh
 tests/shell/test_procd_service.sh
 tests/shell/test_rpc_contract.sh
 tests/shell/test_template_transactions.sh
-tests/shell/test_update.sh'
+tests/shell/test_update.sh
+tests/shell/test_subscription_normalize.sh
+tests/shell/test_subscription_aggregate.sh'
 
 for relative_path in $EXECUTABLE_PATHS; do
 	if [ ! -f "$REPO_ROOT/$relative_path" ]; then
