@@ -4,7 +4,9 @@
 
 [简体中文](#zh-cn) · [English](#english)
 
-**当前源码版本 / Current source version:** `1.8.3`
+**当前源码版本 / Current source version:** `1.8.4`
+
+[1.8.4 双语发布说明 / Bilingual release notes](docs/RELEASE_NOTES_1.8.4.md)
 
 <a id="zh-cn"></a>
 
@@ -16,13 +18,34 @@ Liquid Formula 是面向 OpenWrt 的订阅转换与网络辅助工具套件，�
 订阅转换、JSON 模板、FakeHTTP、FakeSIP、自定义 LuCI Logo/Favicon，以及可选的
 内核网络调优。
 
-它会将订阅转换成可供 **sing-box** 使用的 JSON 配置，但**不包含也不运行 sing-box
-本身**。你仍需安装
+它会将订阅转换成可供 **sing-box** 使用的 JSON 配置，但**不包含、不启动也不管理
+sing-box 本身**。如果系统中已有兼容的 `sing-box` 命令，更新流程会额外运行
+`sing-box check` 校验输出；否则仍会执行 JSON 结构校验。你仍需安装
 [OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo) 或其他 sing-box
 运行时来处理代理、路由、防火墙、访问控制和配置调度。
 
 FakeHTTP 和 FakeSIP 只是数据包混淆辅助工具，不是 VPN、代理或加密层，也不能保证
 对抗人工流量分析。
+
+### 1.8.4 更新摘要
+
+- 内置附件提供的最新版 `momo-template.json` 和 `localdns-template.json`；两者在新安装
+  中均启用，`momo_template` 仍是默认模板。升级时继续把模板作为 conffile 处理，不会
+  无条件覆盖用户编辑。
+- 模板上传、保存、重命名、启用状态变化或删除成功后，模板表格和 **Default
+  template** 下拉列表会从同一份最新 RPC 结果同步刷新，无需刷新页面，也不会清除其他
+  尚未保存的表单值。
+- 支持 1–8 个有序订阅 URL 和失败策略 B：某个 URL 拉取失败时，只能使用与该 URL
+  加密绑定且仍有效的旧缓存；如果没有有效缓存，整次更新失败并继续使用上一份完整配置。
+- 支持 sing-box JSON、URI 列表及仅包含根级 `proxies` 的 Clash/Mihomo YAML；不会获取
+  或递归处理 `proxy-providers`。精确重复节点保留首项；同名但内容不同的节点全部保留并
+  获得稳定、唯一的编号。
+- FakeHTTP/FakeSIP 自动模式通过 OpenWrt 官方 `network.sh` API 解析当前默认 IPv4/IPv6
+  WAN 的实际 L3 设备；手动选择始终优先。自动模式不实现 mwan3 或多 WAN 策略扩展。
+- 保留已审查的 Tuning 事务修复、卸载保护和既有 DPI 行为；不会卸载 `momo` 或
+  `luci-app-momo`。NFQUEUE `8970`/`8971` 及 FakeSIP 默认排除 UDP 53 均未改变。
+- 原转换器目录 `openwrt-feed/liquid-formula/src` 与 1.8.3 保持字节不变；多订阅聚合器
+  位于该冻结目录之外，并由同一 OpenWrt Go 构建流程从源码编译。
 
 ### 软件包组成
 
@@ -30,7 +53,7 @@ FakeHTTP 和 FakeSIP 只是数据包混淆辅助工具，不是 VPN、代理或�
 
 | 软件包 | 架构 | 内容 |
 | --- | --- | --- |
-| `liquid-formula` | 与设备 CPU 架构对应 | `sb-sub-c` 0.7.2-formula 转换器、procd 服务、默认模板、配置生成与更新脚本、FakeHTTP 0.9.21、FakeSIP 0.9.8 |
+| `liquid-formula` | 与设备 CPU 架构对应 | `sb-sub-c` 0.7.2-formula 转换器、订阅聚合网关、procd 服务、Momo 与 Local DNS 模板、配置生成与更新脚本、FakeHTTP 0.9.21、FakeSIP 0.9.8 |
 | `luci-app-liquid-formula` | `all` | LuCI 页面、rpcd 后端、ACL、安全上传接口、自定义 Logo 和内核调优工具 |
 
 FakeHTTP 和 FakeSIP 已合并到 `liquid-formula` 主包，不再单独发布 DPI 软件包。
@@ -51,15 +74,23 @@ FakeHTTP 和 FakeSIP 已合并到 `liquid-formula` 主包，不再单独发布 D
 
 ### 主要功能
 
-- 在 LuCI 中配置订阅地址、User-Agent、转换端口、密码、刷新周期、模板和输出路径。
-- 支持 sing-box JSON、base64 URI 列表和明文 URI 列表。
+- 在 LuCI 中配置 1–8 个有序订阅地址、User-Agent、转换端口、密码、刷新周期、模板和
+  输出路径。
+- 支持 sing-box JSON、base64 URI 列表、明文 URI 列表，以及根级包含 inline
+  `proxies` 的 Clash/Mihomo YAML。
 - 支持 `ss`、`vmess`、`vless`、`trojan`、`hysteria2`/`hy2`、`tuic`、
   `anytls`、`socks`/`socks5` URI；SSR 会被跳过。
-- Clash/Clash.Meta YAML 会被识别并明确拒绝。遇到此格式时，请将订阅
-  User-Agent 改成 sing-box 或 v2rayN 类型。
+- Clash/Mihomo 的 `proxy-providers` 不会被读取、下载或递归展开；只有 provider、没有
+  inline `proxies` 的文档会失败。
+- 多订阅按 URL 顺序、再按每个来源中的节点顺序合并。精确重复节点保留首项；同名但
+  内容不同的节点会稳定编号，而不会被误删。
+- 某个来源失败时使用其自身的 URL 绑定旧缓存继续合并；没有有效旧缓存时整次操作失败，
+  不发布半成品。LuCI 仅显示安全的来源序号、格式、计数、fresh/fallback 状态和固定
+  错误分类，不暴露完整 URL、令牌或原始上游错误。
 - 转换器由 procd 管理，支持开机延迟、健康检查、自动刷新和真实运行状态展示。
 - Refresh、Check 和 Update 在后台执行，不占用 LuCI 的短时 RPC 请求。
-- JSON 模板可上传、编辑、启用、停用和删除；单个模板最大 1 MiB。
+- JSON 模板可上传、编辑、启用、停用和删除；单个模板最大 1 MiB。成功变更后，模板
+  表格与默认模板下拉框会立即一起刷新，并保留页面中其他未保存值。
 - 更新输出文件前会生成并校验 JSON，再原子替换正式文件，最多保留 5 份历史备份。
 - 同时显示本机环回转换 URL 和 LAN 转换 URL。
 - 检测到 OpenWrt-momo 时，可将 FakeHTTP/FakeSIP 当前配置的 mark/mask 同步到
@@ -121,9 +152,10 @@ OpenWrt 25.12 要求 APK 具有受信任签名。直接安装 GitHub Release 中
 ### 快速开始
 
 1. 打开 **Services → Liquid Formula → Singbox Formula**。
-2. 填写订阅地址，并选择订阅服务商能够识别的 User-Agent。
+2. 按合并顺序填写 1–8 个订阅地址，并选择订阅服务商能够识别的 User-Agent。
 3. 修改默认访问密码 `890716`。
-4. 选择一个已启用的模板；首次安装默认提供 `Momo Template`。
+4. 选择一个已启用的模板；首次安装会同时启用 `Momo Template` 和
+   `Local DNS Template`，默认仍为 `Momo Template`。
 5. 开启转换服务并点击 **Save & Apply**。
 6. 等待状态显示为 **Running**，而不是 **Running (not ready)**。
 7. 让 sing-box 运行时读取默认输出文件
@@ -143,6 +175,8 @@ OpenWrt 25.12 要求 APK 具有受信任签名。直接安装 GitHub Release 中
 | **FakeSIP** | UDP DPI 混淆、端口过滤、SIP 身份、接口/方向/协议栈/TTL/NFQUEUE/mark 配置 |
 
 模板管理位于 **Singbox Formula** 页面底部，不是独立菜单或独立标签页。
+上传、保存、重命名、启用状态变化或删除成功后，模板表格与 **Default template**
+下拉框会立即同步更新；无需刷新整个页面，其他尚未保存的设置保持不变。
 
 #### 转换器操作
 
@@ -164,19 +198,29 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
 - `cake` 需要 `kmod-sched-cake`，`bbr` 需要 `kmod-tcp-bbr`。
 - 内核调优默认关闭；开启后使用包独占的
   `/etc/sysctl.d/99-liquid-formula.conf`。
+- Apply、Disable 和卸载恢复共享同一个事务锁；配置与备份使用原子替换，并保留原文件
+  模式。读取错误、符号链接目标或不完整回滚会明确失败，而不是报告成功。
+- 每个调优键独立备份和恢复，旧备份会在安全时退役；卸载脚本必须先成功恢复持久化
+  调优状态，之后才继续其他清理。
 
 #### FakeHTTP
 
 - 默认：关闭、开机延迟 60 秒、出站、IPv4+IPv6、NFQUEUE `8970`、
-  mark/mask `0x8000/0x8000`。
-- 支持一个或多个实际 WAN 设备，以及出站、入站或双向流量。
+  mark/mask `0x8000/0x8000`、自动跟随 OpenWrt 默认 WAN。
+- 自动模式分别调用官方 `network_find_wan()`/`network_find_wan6()` 和
+  `network_get_device()`，因此 PPPoE、DHCP 与静态 WAN 都使用实际 L3 设备。它只跟随
+  每个地址族的默认 WAN，不解释 mwan3 或其他多 WAN 策略。
+- 手动模式始终覆盖自动解析，并保留原有一个或多个实际设备选择；支持出站、入站或
+  双向流量。
 - payload 支持 HTTP Host、HTTPS SNI 和 1–1200 字节的 `.bin` 文件，并按
   LuCI 列表顺序轮转。
 
 #### FakeSIP
 
 - 默认：关闭、开机延迟 40 秒、出站、IPv4+IPv6、排除 UDP 53、
-  NFQUEUE `8971`、mark/mask `0x10000/0x10000`。
+  NFQUEUE `8971`、mark/mask `0x10000/0x10000`、自动跟随 OpenWrt 默认 WAN。
+- 自动解析和手动优先规则与 FakeHTTP 相同；FakeSIP 不提供不受限制的 all-device
+  模式，也不扩展多 WAN 策略。
 - 支持 UDP 端口包含、排除或全部匹配，以及自动生成或自定义 SIP URI。
 - 不解析 IPv6 扩展头，只处理基础 IPv6 头后直接出现的 UDP 数据包。
 
@@ -190,7 +234,7 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
 | `boot_delay` | `90` | 开机自动启动延迟，单位为秒；手动启动不等待 |
 | `port` | `9716` | 转换器 HTTP 监听端口 |
 | `password` | `890716` | 转换地址访问密码 |
-| `subscription_url` | 空 | 订阅地址 |
+| `subscription_url` | 空 | 0–8 项有序 HTTP(S) 订阅地址；服务启用时至少需要 1 项 |
 | `user_agent` | `sing-box 1.11.0` | 拉取订阅时使用的 User-Agent |
 | `subscription_timeout` | `60` | 订阅请求超时，单位为秒 |
 | `refresh_interval` | `360` | 自动刷新周期，单位为分钟 |
@@ -201,6 +245,11 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
 | `log_file` | `/var/log/liquid-formula/server.log` | 转换器日志 |
 | `output_config` | `/etc/momo/profiles/config.json` | 校验后的输出文件 |
 | `template_base_url` | `http://127.0.0.1/liquid-formula/templates` | 仅允许指向本机环回地址的模板 URL 前缀 |
+
+订阅刷新采用策略 B。每个 URL 的成功结果与其 URL 摘要绑定；上游失败时只允许回退到
+该 URL 自己的已验证旧缓存。只要任一失败来源没有有效缓存，就不会选择新 generation，
+也不会安装部分输出，上一份完整配置继续生效。来源顺序变化不会把一个 URL 的缓存错误
+借给另一个 URL。
 
 `output_config` 只允许位于以下目录并以 `.json` 结尾：
 
@@ -231,13 +280,13 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
 110 个文件”方案。
 
 1. 解压完整源码包。
-2. 进入 `Liquid-Formula-main`，把其**内部内容**上传到仓库根目录；不要上传 ZIP，
-   也不要额外保留一层 `Liquid-Formula-main`。
+2. 进入 `Liquid-Formula-1.8.4`，把其**内部内容**上传到仓库根目录；不要上传 ZIP，
+   也不要额外保留一层 `Liquid-Formula-1.8.4`。
 3. 显示并上传所有隐藏文件。macOS Finder 可按 `Command + Shift + .`，Windows
    Explorer 可启用“显示隐藏的项目”。
 4. 如果网页限制单次文件数量，可按目录分成多轮上传，但必须保持原相对路径。
 5. 不得遗漏：
-   - 根目录 `.github/` 与 `.gitignore`
+   - 根目录 `.github/`、`.gitignore` 与 `.gitattributes`
    - Go 源码和第三方源码中的 `.gitignore`、`.github`、`.clang-format`
    - `third_party/sources/` 中两个源码压缩包与 `third_party/SHA256SUMS`
 6. GitHub 网页上传不会保留 Unix 可执行位。Actions 会在 checkout 后立即通过
@@ -259,6 +308,10 @@ Actions 行为：
 从源码交叉编译；仓库不包含预编译 ELF。第三方维护源码、对应归档和 SHA-256
 信息见 [`THIRD_PARTY_SOURCES.md`](THIRD_PARTY_SOURCES.md)。
 
+1.8.4 没有修改冻结的原转换器 Go 树 `openwrt-feed/liquid-formula/src`。多订阅网关源码
+放在 `src-subscription-gateway`，构建时才复制到现有 Go module 的独立 `cmd` 包中；
+这既复用锁定依赖，也保持原转换器源码可逐字节核验。
+
 ### 安全与行为声明
 
 - 转换器实际监听 `:<port>`，即路由器所有接口，并非只监听 `127.0.0.1`。
@@ -269,6 +322,8 @@ Actions 行为：
   LuCI、SSH 和日志读取权限。
 - FakeHTTP 和 FakeSIP 默认关闭。错误的 WAN 接口、NFQUEUE、mark/mask 或流量方向
   配置可能导致网络异常，并可能与 mwan3、策略路由、VPN 或 QoS 冲突。
+- 自动 WAN 解析只使用 OpenWrt 官方当前默认 IPv4/IPv6 WAN。它不是多 WAN 负载均衡
+  或故障转移策略；需要指定其他出口时应使用手动模式。
 - 自定义 Logo 会直接在支持的 LuCI 主题头部模板中加入带标记的加载片段；关闭功能
   或卸载 LuCI 包时会移除这些标记。
 - 内核调优默认关闭。启用时会备份并移出 `/etc/sysctl.conf` 中由本包管理的同名键；
@@ -298,6 +353,10 @@ apk del liquid-formula
 调优配置。用户生成的数据、上传资源、自定义模板、日志、缓存及输出 JSON 可能不会
 自动删除；请在备份后按需手动清理。
 
+卸载 `liquid-formula` 或 `luci-app-liquid-formula` **不会**执行 `apk del`/`opkg remove`
+来删除 `momo` 或 `luci-app-momo`，也不会把它们声明为可连带删除的依赖。momo 配置和
+运行时的后续清理由 momo 自身软件包负责。
+
 ### 致谢与许可证
 
 - 订阅转换器：
@@ -326,12 +385,38 @@ Liquid Formula is an OpenWrt subscription-conversion and network utility suite. 
 interface manages subscription conversion, JSON templates, FakeHTTP, FakeSIP, custom LuCI
 logo/favicon assets, and optional kernel network tuning.
 
-It produces JSON profiles for **sing-box**, but it **does not include or run sing-box**. A
-runtime such as [OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo) is still
+It produces JSON profiles for **sing-box**, but it **does not bundle, start, or manage
+sing-box**. When a compatible `sing-box` command is already installed, the update path also runs
+`sing-box check`; otherwise it still performs the JSON structure check. A runtime such as
+[OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo) is still
 required for proxying, routing, firewall policy, access control, and profile scheduling.
 
 FakeHTTP and FakeSIP are packet-obfuscation helpers only. They are not a VPN, proxy, or
 encryption layer and do not guarantee resistance to manual traffic analysis.
+
+### 1.8.4 highlights
+
+- Ships the updated supplied `momo-template.json` and `localdns-template.json`. Both are enabled
+  on a new installation, while `momo_template` remains the default. Package upgrades continue to
+  treat them as conffiles instead of unconditionally overwriting user edits.
+- After a template is uploaded, saved, renamed, enabled/disabled, or deleted, the template table
+  and **Default template** choices refresh atomically from one authoritative RPC result. No page
+  reload is needed and unrelated dirty form values are preserved.
+- Supports one to eight ordered subscription URLs with failure policy B. A failed URL may fall
+  back only to a still-valid old cache cryptographically bound to that exact URL; without such a
+  cache the operation fails and the previous complete configuration remains selected.
+- Accepts sing-box JSON, URI lists, and Clash/Mihomo YAML with root-level inline `proxies` only.
+  It never fetches or recursively expands `proxy-providers`. Exact duplicate nodes keep the first
+  occurrence; same-name nodes with different content are retained under stable unique numbering.
+- FakeHTTP/FakeSIP auto mode resolves the actual L3 device for the current OpenWrt default IPv4
+  and IPv6 WAN through the official `network.sh` API. Explicit manual selection always wins; auto
+  mode does not add mwan3 or multi-WAN policy handling.
+- Preserves the reviewed Tuning transaction fixes, uninstall safeguards, and existing DPI
+  behavior. Removal never uninstalls `momo` or `luci-app-momo`; NFQUEUE `8970`/`8971` and
+  FakeSIP's default UDP 53 exclusion are unchanged.
+- The original converter tree at `openwrt-feed/liquid-formula/src` is byte-identical to 1.8.3.
+  The multi-source gateway lives outside that frozen tree and is compiled from source by the same
+  OpenWrt Go build flow.
 
 ### Packages
 
@@ -339,7 +424,7 @@ Only two packages are released, and they always share the same version:
 
 | Package | Architecture | Contents |
 | --- | --- | --- |
-| `liquid-formula` | Device-specific | `sb-sub-c` 0.7.2-formula, procd service, default template, configuration/update helpers, FakeHTTP 0.9.21, and FakeSIP 0.9.8 |
+| `liquid-formula` | Device-specific | `sb-sub-c` 0.7.2-formula, subscription gateway, procd service, Momo and Local DNS templates, configuration/update helpers, FakeHTTP 0.9.21, and FakeSIP 0.9.8 |
 | `luci-app-liquid-formula` | `all` | LuCI views, rpcd backend, ACL, secure upload endpoint, custom-logo support, and kernel tuning |
 
 FakeHTTP and FakeSIP are part of the main `liquid-formula` package. There is no separate DPI
@@ -362,17 +447,26 @@ Support is not limited to the Linksys E8450 / Belkin RT3200; those devices are e
 
 ### Features
 
-- Configure the subscription URL, User-Agent, port, password, refresh interval, templates, and
-  output path from LuCI.
-- Accept sing-box JSON, base64-encoded URI lists, and plain URI lists.
+- Configure one to eight ordered subscription URLs, User-Agent, port, password, refresh interval,
+  templates, and output path from LuCI.
+- Accept sing-box JSON, base64-encoded URI lists, plain URI lists, and Clash/Mihomo YAML containing
+  root-level inline `proxies`.
 - Parse `ss`, `vmess`, `vless`, `trojan`, `hysteria2`/`hy2`, `tuic`, `anytls`, and
   `socks`/`socks5` URIs; SSR entries are skipped.
-- Detect and reject Clash/Clash.Meta YAML with a clear message. Switch the subscription
-  User-Agent to a sing-box or v2rayN identity instead.
+- Never read, download, or recurse through Clash/Mihomo `proxy-providers`; a provider-only
+  document fails because it has no inline nodes.
+- Merge sources in URL order and then node order. Exact semantic duplicates keep their first
+  occurrence, while same-name nodes with different content remain under deterministic numbering.
+- Fall back per URL to that URL's bound old cache. If a failed source has no valid cache, the whole
+  attempt fails without publishing a partial generation. LuCI exposes only safe source indices,
+  format/count data, fresh/fallback state, and fixed failure categories—not complete URLs, tokens,
+  or raw upstream errors.
 - Run the converter under procd with boot delay, health checks, automatic refresh, and truthful
   readiness status.
 - Run Refresh, Check, and Update as background actions outside LuCI's short RPC lifetime.
-- Upload, edit, enable, disable, and delete JSON templates up to 1 MiB each.
+- Upload, edit, enable, disable, and delete JSON templates up to 1 MiB each. Successful mutations
+  immediately refresh both the table and default-template dropdown while retaining unrelated
+  unsaved form values.
 - Validate generated JSON and atomically replace the output file, retaining up to five backups.
 - Display both loopback and LAN conversion URLs.
 - Synchronize the current FakeHTTP/FakeSIP mark and mask into momo's `bypass_fwmark` when
@@ -434,9 +528,11 @@ post-install script clears LuCI caches and restarts `rpcd`; it deliberately does
 ### Quick start
 
 1. Open **Services → Liquid Formula → Singbox Formula**.
-2. Enter the subscription URL and choose a User-Agent accepted by the provider.
+2. Enter one to eight subscription URLs in merge order and choose a User-Agent accepted by the
+   providers.
 3. Replace the default access password `890716`.
-4. Choose an enabled template; `Momo Template` is provided initially.
+4. Choose an enabled template. A new installation enables both `Momo Template` and
+   `Local DNS Template`; `Momo Template` remains the default.
 5. Enable the converter and click **Save & Apply**.
 6. Wait for **Running**, rather than **Running (not ready)**.
 7. Point the sing-box runtime at `/etc/momo/profiles/config.json`, or use the loopback/LAN URL
@@ -457,6 +553,9 @@ Path: **Services → Liquid Formula**
 
 Template management is embedded at the bottom of **Singbox Formula**; it is not a separate menu
 entry or tab.
+After an upload, save, rename, enable/disable change, or delete succeeds, the table and
+**Default template** dropdown update together immediately. The page is not reloaded, so other
+unsaved settings remain intact.
 
 #### Converter actions
 
@@ -478,19 +577,31 @@ started for that operation and never stop a converter that was already running.
 - `cake` requires `kmod-sched-cake`; `bbr` requires `kmod-tcp-bbr`.
 - Kernel tuning is disabled by default and uses the package-owned
   `/etc/sysctl.d/99-liquid-formula.conf` when enabled.
+- Apply, Disable, and uninstall restoration share one transaction lock. Configuration and backup
+  writes are atomic and preserve the original file mode. Read failures, symlink targets, and
+  incomplete rollback fail explicitly instead of reporting success.
+- Each managed key is backed up and restored independently, with safe stale-backup retirement.
+  Package removal must restore persistent tuning successfully before later cleanup proceeds.
 
 #### FakeHTTP
 
 - Defaults: disabled, 60-second boot delay, outbound, dual stack, NFQUEUE `8970`, mark/mask
-  `0x8000/0x8000`.
-- Supports one or more actual WAN devices and outbound, inbound, or bidirectional traffic.
+  `0x8000/0x8000`, and automatic OpenWrt default-WAN selection.
+- Auto mode uses the official `network_find_wan()`/`network_find_wan6()` plus
+  `network_get_device()`, so PPPoE, DHCP, and static WANs resolve to their actual L3 device. It
+  follows only the default WAN per address family and does not interpret mwan3 or other multi-WAN
+  policy.
+- Manual mode always overrides auto detection and retains the existing selection of one or more
+  actual devices. Outbound, inbound, and bidirectional processing remain available.
 - Payload rows may use HTTP Host, HTTPS SNI, or validated 1–1200 byte `.bin` files, rotated in
   their LuCI order.
 
 #### FakeSIP
 
 - Defaults: disabled, 40-second boot delay, outbound, dual stack, exclude UDP 53, NFQUEUE `8971`,
-  mark/mask `0x10000/0x10000`.
+  mark/mask `0x10000/0x10000`, and automatic OpenWrt default-WAN selection.
+- Auto resolution and manual precedence match FakeHTTP. FakeSIP has no unrestricted all-device
+  mode and does not extend multi-WAN policy handling.
 - Supports include, exclude, or all-port UDP filters and automatic or custom SIP URIs.
 - Does not parse IPv6 extension headers; only UDP directly following the base IPv6 header is
   processed.
@@ -505,7 +616,7 @@ Converter UCI file: `/etc/config/liquid_formula`
 | `boot_delay` | `90` | Boot-only autostart delay in seconds; manual starts are immediate |
 | `port` | `9716` | Converter HTTP listening port |
 | `password` | `890716` | Conversion URL access password |
-| `subscription_url` | empty | Source subscription URL |
+| `subscription_url` | empty | Ordered list of 0–8 HTTP(S) URLs; at least one is required while enabled |
 | `user_agent` | `sing-box 1.11.0` | User-Agent sent to the provider |
 | `subscription_timeout` | `60` | Subscription request timeout in seconds |
 | `refresh_interval` | `360` | Automatic refresh interval in minutes |
@@ -516,6 +627,12 @@ Converter UCI file: `/etc/config/liquid_formula`
 | `log_file` | `/var/log/liquid-formula/server.log` | Converter log |
 | `output_config` | `/etc/momo/profiles/config.json` | Validated output file |
 | `template_base_url` | `http://127.0.0.1/liquid-formula/templates` | Loopback-only template URL prefix |
+
+Subscription refresh uses policy B. Each successful source result is bound to a digest of its
+exact URL. If an upstream request fails, only that URL's own validated old cache may be used. If
+any failed source lacks a valid cache, no new generation or partial output is selected and the
+previous complete configuration remains active. Reordering URLs cannot lend one URL's cache to
+another.
 
 `output_config` must end in `.json` and reside under one of:
 
@@ -546,14 +663,14 @@ The repository supports a source-only workflow through GitHub's web uploader. Do
 obsolete fixed “two batches / 110 files” instructions from older README versions.
 
 1. Extract the complete source archive.
-2. Enter `Liquid-Formula-main` and upload its **contents** to the repository root. Do not upload
-   the ZIP or retain `Liquid-Formula-main` as an extra directory level.
+2. Enter `Liquid-Formula-1.8.4` and upload its **contents** to the repository root. Do not upload
+   the ZIP or retain `Liquid-Formula-1.8.4` as an extra directory level.
 3. Reveal and include hidden files. Press `Command + Shift + .` in macOS Finder, or enable hidden
    items in Windows Explorer.
 4. If the browser limits one upload, split it by directory across several commits while preserving
    every relative path.
 5. Do not omit:
-   - root `.github/` and `.gitignore`;
+   - root `.github/`, `.gitignore`, and `.gitattributes`;
    - nested `.gitignore`, `.github`, and `.clang-format` files in Go/third-party source;
    - both source archives in `third_party/sources/` and `third_party/SHA256SUMS`.
 6. Web upload does not preserve Unix executable bits. Immediately after checkout, Actions invokes
@@ -577,6 +694,12 @@ OpenWrt SDK. No precompiled ELF is stored in the repository. See
 [`THIRD_PARTY_SOURCES.md`](THIRD_PARTY_SOURCES.md) for maintained-source provenance, archives,
 and SHA-256 records.
 
+Release 1.8.4 does not modify the frozen original converter Go tree at
+`openwrt-feed/liquid-formula/src`. The multi-subscription gateway lives in
+`src-subscription-gateway` and is copied into a separate `cmd` package in the existing Go module
+only at build time. This reuses the locked dependency set while keeping the original converter
+source byte-verifiable.
+
 ### Security and behavior disclosures
 
 - The converter listens on `:<port>` on all router interfaces, not only on `127.0.0.1`.
@@ -589,6 +712,9 @@ and SHA-256 records.
   and query parameters. Restrict LuCI, SSH, and log access.
 - FakeHTTP and FakeSIP are disabled by default. Incorrect WAN, NFQUEUE, mark/mask, or direction
   settings can disrupt networking or conflict with mwan3, policy routing, VPNs, or QoS.
+- Automatic WAN resolution uses only OpenWrt's current default IPv4/IPv6 WAN. It is not a
+  multi-WAN load-balancing or failover policy; select devices manually when another egress is
+  required.
 - Custom Logo directly inserts marked loader snippets into supported LuCI theme header templates.
   Disabling the feature or uninstalling the LuCI package removes those markers.
 - Kernel tuning is disabled by default. When enabled, matching keys in `/etc/sysctl.conf` are backed
@@ -620,6 +746,10 @@ Removal stops the related services, cleans firewall objects created by the proje
 logo markers, and reverses persistent tuning. User-generated data, uploaded assets, custom
 templates, logs, caches, and generated output JSON may remain; back them up and remove them
 manually if required.
+
+Removing `liquid-formula` or `luci-app-liquid-formula` **does not** run `apk del`/`opkg remove`
+for `momo` or `luci-app-momo`, and neither package is declared as a removable dependency. Any
+later cleanup of momo configuration or runtime data belongs to momo's own package lifecycle.
 
 ### Credits and licenses
 
