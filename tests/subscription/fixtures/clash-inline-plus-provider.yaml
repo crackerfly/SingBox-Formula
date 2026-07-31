@@ -1,0 +1,12 @@
+proxies:
+  - name: Inline only
+    type: ss
+    server: 192.0.2.30
+    port: 8388
+    cipher: chacha20-ietf-poly1305
+    password: inline-password
+proxy-providers:
+  must-not-fetch:
+    type: http
+    url: http://127.0.0.1:9/provider-secret-token
+    path: ./providers/never.yaml

@@ -13,6 +13,7 @@ DPI="$ROOT/tests/dpi"
 
 "$DPI/test_service_common.sh"
 "$DPI/test_boot_delay.sh"
+"$DPI/test_wan_resolver.sh"
 "$DPI/test_service_commands.sh"
 "$DPI/test_hotplug.sh"
 "$DPI/test_upload.sh"

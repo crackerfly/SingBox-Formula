@@ -1,0 +1,5 @@
+proxy-providers:
+  forbidden-provider:
+    type: http
+    url: https://provider.example/subscription?token=provider-secret-token
+    path: ./providers/forbidden.yaml

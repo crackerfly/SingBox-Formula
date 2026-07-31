@@ -1,0 +1,53 @@
+mixed-port: 7890
+proxies:
+  - name: Clash SS
+    type: ss
+    server: 192.0.2.20
+    port: 8388
+    cipher: aes-256-gcm
+    password: clash-ss-password
+    udp: false
+  - name: Clash VMess
+    type: vmess
+    server: vmess.example
+    port: 443
+    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: vmess.example
+    client-fingerprint: chrome
+    network: ws
+    ws-opts:
+      path: /socket
+      headers:
+        Host: cdn.example
+      max-early-data: 2048
+      early-data-header-name: Sec-WebSocket-Protocol
+  - name: Clash Trojan
+    type: trojan
+    server: trojan.example
+    port: 443
+    password: clash-trojan-password
+    sni: trojan.example
+    network: grpc
+    grpc-opts:
+      grpc-service-name: tunnel
+  - name: Unsafe certificate fingerprint
+    type: vmess
+    server: unsafe.example
+    port: 443
+    uuid: ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee
+    alterId: 0
+    cipher: auto
+    tls: true
+    fingerprint: certificate-sha256-is-not-spki
+  - name: Unsupported SSR
+    type: ssr
+    server: ssr.example
+    port: 443
+proxy-groups:
+  - name: never-read
+    type: select
+    proxies:
+      - Clash SS

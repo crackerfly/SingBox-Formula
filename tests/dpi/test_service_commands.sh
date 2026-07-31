@@ -10,8 +10,44 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 LFDPI_BOOT_STATE_DIR="$TMP/boot-state"
 LFDPI_UPTIME_FILE="$TMP/uptime"
-export LFDPI_BOOT_STATE_DIR LFDPI_UPTIME_FILE
+LFDPI_NETWORK_HELPERS="$TMP/network.sh"
+LFDPI_WAN_RESOLVER="$PKG/files/usr/share/liquid-formula-dpi/wan-resolver.sh"
+LFDPI_NETWORK_CALL_LOG="$TMP/network.calls"
+export LFDPI_BOOT_STATE_DIR LFDPI_UPTIME_FILE LFDPI_NETWORK_HELPERS
+export LFDPI_WAN_RESOLVER LFDPI_NETWORK_CALL_LOG
 printf '100.00 100.00\n' >"$LFDPI_UPTIME_FILE"
+: >"$LFDPI_NETWORK_CALL_LOG"
+
+cat >"$LFDPI_NETWORK_HELPERS" <<'EOF'
+network_flush_cache() {
+	printf 'flush\n' >>"$LFDPI_NETWORK_CALL_LOG"
+}
+
+network_find_wan() {
+	printf 'find4\n' >>"$LFDPI_NETWORK_CALL_LOG"
+	[ -n "${TF_NETWORK_V4:-}" ] || return 1
+	eval "$1=\$TF_NETWORK_V4"
+}
+
+network_find_wan6() {
+	printf 'find6\n' >>"$LFDPI_NETWORK_CALL_LOG"
+	[ -n "${TF_NETWORK_V6:-}" ] || return 1
+	eval "$1=\$TF_NETWORK_V6"
+}
+
+network_get_device() {
+	destination="$1"
+	network="$2"
+	printf 'device %s\n' "$network" >>"$LFDPI_NETWORK_CALL_LOG"
+	case "$network" in
+		"${TF_NETWORK_V4:-__missing4}") device="${TF_DEVICE_V4:-}" ;;
+		"${TF_NETWORK_V6:-__missing6}") device="${TF_DEVICE_V6:-}" ;;
+		*) return 1 ;;
+	esac
+	[ -n "$device" ] || return 1
+	eval "$destination=\$device"
+}
+EOF
 
 sed -e 's#^PROG=.*#PROG="/bin/true"#' \
 	-e "s#^COMMON=.*#COMMON=\"$COMMON\"#" \
@@ -57,6 +93,7 @@ logger() { :; }
 COMMAND_ARGS=''
 NETDEVS=''
 EVENTS=''
+INSTANCE_EVENTS=''
 ORDER_LOG="$TMP/order.log"
 : >"$ORDER_LOG"
 append_line() {
@@ -66,8 +103,8 @@ append_line() {
 $value"; else current="$value"; fi
 	eval "$variable=\$current"
 }
-procd_open_instance() { :; }
-procd_close_instance() { :; }
+procd_open_instance() { append_line INSTANCE_EVENTS "open $1"; }
+procd_close_instance() { append_line INSTANCE_EVENTS close; }
 procd_set_param() {
 	local parameter="$1" value
 	shift
@@ -83,11 +120,20 @@ procd_append_param() {
 	esac
 }
 procd_kill() {
+	PROCD_JSON_CONTEXT=destroyed
 	printf 'kill %s\n' "$1" >>"$ORDER_LOG"
 	append_line EVENTS "kill $1"
 }
 procd_lock() { append_line EVENTS "procd-lock"; }
 procd_add_reload_trigger() { append_line EVENTS "trigger $1"; }
+mv() {
+	local destination=''
+	for destination in "$@"; do :; done
+	case "${FAIL_STATE_MOVE:-}:$destination" in
+		wan:*.wan|link:*.link) return 1 ;;
+	esac
+	command mv "$@"
+}
 start() {
 	local result=0
 	append_line EVENTS 'definition-open'
@@ -332,6 +378,230 @@ a.example
 	exit 1
 }
 [ "$NETDEVS" = wan0 ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "selected FakeHTTP unexpectedly called WAN auto resolution" >&2
+	exit 1
+}
+
+# A valid official default must never supplement or rescue selected mode.
+# Manual configuration is authoritative even when it is currently unavailable.
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=wan
+TF_DEVICE_V4=auto4
+TF_NETWORK_V6=wan6
+TF_DEVICE_V6=auto6
+CFG_main_interface_mode=selected
+CFG_main_interface=ghost0
+tf_interface_exists() {
+	tf_valid_interface "$1" &&
+		case "$1" in auto4|auto6) return 0 ;; *) return 1 ;; esac
+}
+if start_service; then
+	echo "selected FakeHTTP fell back to an automatically resolved WAN" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "selected FakeHTTP called WAN auto resolution after manual validation failed" >&2
+	exit 1
+}
+
+# FakeHTTP's existing unrestricted mode remains a separate explicit choice.
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+CFG_main_interface_mode=all
+CFG_main_interface=ghost0
+if ! start_service; then
+	echo "FakeHTTP rejected its existing all-device mode" >&2
+	exit 1
+fi
+printf '%s\n' "$COMMAND_ARGS" | grep -Fx -- '-a' >/dev/null
+if printf '%s\n' "$COMMAND_ARGS" | grep -Fx -- '-i' >/dev/null; then
+	echo "FakeHTTP all-device mode unexpectedly appended a selected interface" >&2
+	exit 1
+fi
+[ -z "$NETDEVS" ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "FakeHTTP all-device mode unexpectedly called WAN auto resolution" >&2
+	exit 1
+}
+
+# In auto+dual mode one available family is enough. The command must bind only
+# the officially resolved L3 device and enable only that available family.
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=''
+TF_DEVICE_V4=''
+TF_NETWORK_V6=wan6
+TF_DEVICE_V6=auto6
+CFG_main_interface_mode=auto
+CFG_main_interface=ghost0
+CFG_main_family=dual
+if ! start_service; then
+	echo "FakeHTTP auto mode did not continue with its available IPv6 WAN" >&2
+	exit 1
+fi
+[ "$NETDEVS" = auto6 ]
+[ "$(printf '%s\n' "$COMMAND_ARGS" | grep -E '^-i$|^auto6$|^-4$|^-6$')" = '-i
+auto6
+-6' ] || {
+	echo "FakeHTTP auto mode did not bind exactly the available IPv6 family" >&2
+	printf '%s\n' "$COMMAND_ARGS" >&2
+	exit 1
+}
+[ "$(cat "$LFDPI_NETWORK_CALL_LOG")" = 'flush
+find4
+find6
+device wan6' ] || {
+	echo "FakeHTTP auto mode did not use the official dual-stack resolver chain" >&2
+	cat "$LFDPI_NETWORK_CALL_LOG" >&2
+	exit 1
+}
+
+# State must be committed before any procd instance is constructed. rc.common
+# closes the service JSON after the callback, so returning failure after
+# procd_close_instance would still publish an unauthenticated process.
+for failure in wan link; do
+	COMMAND_ARGS=''
+	NETDEVS=''
+	INSTANCE_EVENTS=''
+	FAIL_STATE_MOVE="$failure"
+	if start_service; then
+		echo "FakeHTTP accepted a forced $failure state write failure" >&2
+		exit 1
+	fi
+	[ -z "$INSTANCE_EVENTS" ] || {
+		echo "FakeHTTP built a procd instance before $failure state commit" >&2
+		exit 1
+	}
+done
+FAIL_STATE_MOVE=''
+
+# Seed a distinct-device dual-stack runtime mapping, then remove one family.
+# link_down must recognize the old mapped device before re-resolving and submit
+# a replacement definition for the surviving family.
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=wan
+TF_DEVICE_V4=auto4
+TF_NETWORK_V6=wan6
+TF_DEVICE_V6=auto6
+tf_interface_exists() {
+	tf_valid_interface "$1" &&
+		case "$1" in auto4|auto6) return 0 ;; *) return 1 ;; esac
+}
+if ! start_service; then
+	echo "FakeHTTP could not seed its dual-stack runtime WAN mapping" >&2
+	exit 1
+fi
+
+# A delayed ifdown must authenticate both the logical network and the device
+# while holding the lifecycle lock. The same PPPoE L3 device may be reused by
+# a newly running logical network, which an old event must not stop.
+TF_NETWORK_V4=wan-new
+if ! start_service; then
+	echo "FakeHTTP could not seed its replacement logical WAN mapping" >&2
+	exit 1
+fi
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+if ! link_down auto4 wan; then
+	echo "FakeHTTP rejected a stale same-device ifdown instead of ignoring it" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ] &&
+	[ "$EVENTS" = procd-lock ] || {
+	echo "FakeHTTP acted on a stale logical-network/device pair" >&2
+	exit 1
+}
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+if ! link_up auto4 wan; then
+	echo "FakeHTTP rejected a stale same-device ifup instead of ignoring it" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ] &&
+	[ "$EVENTS" = procd-lock ] || {
+	echo "FakeHTTP acted on a stale ifup logical-network/device pair" >&2
+	exit 1
+}
+TF_NETWORK_V4=wan
+if ! start_service; then
+	echo "FakeHTTP could not restore its dual-stack runtime WAN mapping" >&2
+	exit 1
+fi
+
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=''
+TF_DEVICE_V4=''
+if ! link_down auto4 wan; then
+	echo "FakeHTTP failed to handle loss of one auto WAN family" >&2
+	exit 1
+fi
+[ "$NETDEVS" = auto6 ]
+printf '%s\n' "$COMMAND_ARGS" | grep -Fx -- '-6' >/dev/null
+if printf '%s\n' "$COMMAND_ARGS" | grep -Fx -- '-4' >/dev/null; then
+	echo "FakeHTTP retained IPv4 after the official IPv4 WAN disappeared" >&2
+	exit 1
+fi
+printf '%s\n' "$EVENTS" | grep -Fx 'kill fakehttp' >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakehttp' >/dev/null
+
+# Losing the final mapped family is a successful stopped state, never a stale
+# empty/partial procd command. Its own firewall state must still be cleaned.
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V6=''
+TF_DEVICE_V6=''
+if ! link_down auto6 wan6; then
+	echo "FakeHTTP did not cleanly stop after its final WAN family disappeared" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+printf '%s\n' "$EVENTS" | grep -Fx 'kill fakehttp' >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakehttp' >/dev/null
+
+# No official WAN is a fail-closed start: no instance is submitted and the
+# prior service/firewall state has already been stopped and cleaned.
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=''
+TF_DEVICE_V4=''
+TF_NETWORK_V6=''
+TF_DEVICE_V6=''
+PROCD_JSON_CONTEXT=intact
+if start_service; then
+	echo "FakeHTTP auto mode started without any official WAN" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+[ "$PROCD_JSON_CONTEXT" = intact ] || {
+	echo "FakeHTTP no-WAN validation destroyed the parent procd JSON context" >&2
+	exit 1
+}
+grep -Fx 'kill fakehttp' "$ORDER_LOG" >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakehttp' >/dev/null
+
+CFG_main_interface_mode=selected
+CFG_main_interface='wan0 wan0'
+CFG_main_family=dual
+tf_interface_exists() { tf_valid_interface "$1" && [ "$1" = wan0 ]; }
+: >"$LFDPI_NETWORK_CALL_LOG"
 
 COMMAND_ARGS=''
 SIBLING_SIP_ENABLED=1
@@ -401,6 +671,226 @@ wan0
 	exit 1
 }
 [ "$NETDEVS" = wan0 ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "selected FakeSIP unexpectedly called WAN auto resolution" >&2
+	exit 1
+}
+
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=wan
+TF_DEVICE_V4=auto4
+CFG_main_interface_mode=selected
+CFG_main_interface=ghost0
+tf_interface_exists() {
+	tf_valid_interface "$1" &&
+		case "$1" in auto4) return 0 ;; *) return 1 ;; esac
+}
+if start_service; then
+	echo "selected FakeSIP fell back to an automatically resolved WAN" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "selected FakeSIP called WAN auto resolution after manual validation failed" >&2
+	exit 1
+}
+
+# FakeSIP gains auto mode but must continue rejecting FakeHTTP's unrestricted
+# all-device mode.
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+CFG_main_interface_mode=all
+CFG_main_interface=wan0
+tf_interface_exists() { tf_valid_interface "$1" && [ "$1" = wan0 ]; }
+if start_service; then
+	echo "FakeSIP accepted unrestricted all-device mode" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+[ ! -s "$LFDPI_NETWORK_CALL_LOG" ] || {
+	echo "invalid FakeSIP all-device mode unexpectedly called WAN auto resolution" >&2
+	exit 1
+}
+
+COMMAND_ARGS=''
+NETDEVS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=wan
+TF_DEVICE_V4=auto4
+TF_NETWORK_V6=''
+TF_DEVICE_V6=''
+CFG_main_interface_mode=auto
+CFG_main_interface=ghost0
+CFG_main_family=dual
+tf_interface_exists() { tf_valid_interface "$1" && [ "$1" = auto4 ]; }
+if ! start_service; then
+	echo "FakeSIP auto mode did not continue with its available IPv4 WAN" >&2
+	exit 1
+fi
+[ "$NETDEVS" = auto4 ]
+[ "$(printf '%s\n' "$COMMAND_ARGS" | grep -E '^-i$|^auto4$|^-4$|^-6$|^-P$|^53$|^-n$|^8971$')" = '-i
+auto4
+-4
+-P
+53
+-n
+8971' ] || {
+	echo "FakeSIP auto mode changed its WAN/family/port/queue command contract" >&2
+	printf '%s\n' "$COMMAND_ARGS" >&2
+	exit 1
+}
+[ "$(cat "$LFDPI_NETWORK_CALL_LOG")" = 'flush
+find4
+device wan
+find6' ] || {
+	echo "FakeSIP auto mode did not use the official dual-stack resolver chain" >&2
+	cat "$LFDPI_NETWORK_CALL_LOG" >&2
+	exit 1
+}
+
+for failure in wan link; do
+	COMMAND_ARGS=''
+	NETDEVS=''
+	INSTANCE_EVENTS=''
+	FAIL_STATE_MOVE="$failure"
+	if start_service; then
+		echo "FakeSIP accepted a forced $failure state write failure" >&2
+		exit 1
+	fi
+	[ -z "$INSTANCE_EVENTS" ] || {
+		echo "FakeSIP built a procd instance before $failure state commit" >&2
+		exit 1
+	}
+done
+FAIL_STATE_MOVE=''
+
+# FakeSIP follows the same old-mapping-before-re-resolution rule without
+# changing its port exclusion, NFQUEUE, or direction semantics.
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=wan
+TF_DEVICE_V4=auto4
+TF_NETWORK_V6=wan6
+TF_DEVICE_V6=auto6
+tf_interface_exists() {
+	tf_valid_interface "$1" &&
+		case "$1" in auto4|auto6) return 0 ;; *) return 1 ;; esac
+}
+if ! start_service; then
+	echo "FakeSIP could not seed its dual-stack runtime WAN mapping" >&2
+	exit 1
+fi
+
+TF_NETWORK_V4=wan-new
+if ! start_service; then
+	echo "FakeSIP could not seed its replacement logical WAN mapping" >&2
+	exit 1
+fi
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+if ! link_down auto4 wan; then
+	echo "FakeSIP rejected a stale same-device ifdown instead of ignoring it" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ] &&
+	[ "$EVENTS" = procd-lock ] || {
+	echo "FakeSIP acted on a stale logical-network/device pair" >&2
+	exit 1
+}
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+if ! link_up auto4 wan; then
+	echo "FakeSIP rejected a stale same-device ifup instead of ignoring it" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ] &&
+	[ "$EVENTS" = procd-lock ] || {
+	echo "FakeSIP acted on a stale ifup logical-network/device pair" >&2
+	exit 1
+}
+TF_NETWORK_V4=wan
+if ! start_service; then
+	echo "FakeSIP could not restore its dual-stack runtime WAN mapping" >&2
+	exit 1
+fi
+
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=''
+TF_DEVICE_V4=''
+if ! link_down auto4 wan; then
+	echo "FakeSIP failed to handle loss of one auto WAN family" >&2
+	exit 1
+fi
+[ "$NETDEVS" = auto6 ]
+[ "$(printf '%s\n' "$COMMAND_ARGS" | grep -E '^-6$|^-P$|^53$|^-n$|^8971$')" = '-6
+-P
+53
+-n
+8971' ] || {
+	echo "FakeSIP changed its fixed command contract after one-family loss" >&2
+	printf '%s\n' "$COMMAND_ARGS" >&2
+	exit 1
+}
+if printf '%s\n' "$COMMAND_ARGS" | grep -Fx -- '-4' >/dev/null; then
+	echo "FakeSIP retained IPv4 after the official IPv4 WAN disappeared" >&2
+	exit 1
+fi
+printf '%s\n' "$EVENTS" | grep -Fx 'kill fakesip' >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakesip' >/dev/null
+
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V6=''
+TF_DEVICE_V6=''
+if ! link_down auto6 wan6; then
+	echo "FakeSIP did not cleanly stop after its final WAN family disappeared" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+printf '%s\n' "$EVENTS" | grep -Fx 'kill fakesip' >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakesip' >/dev/null
+
+# The fail-closed start may kill the previous procd definition only in the
+# isolated cleanup shell. A current-shell procd_kill would run json_cleanup()
+# and corrupt rc.common's in-progress service definition.
+COMMAND_ARGS=''
+NETDEVS=''
+EVENTS=''
+: >"$LFDPI_NETWORK_CALL_LOG"
+TF_NETWORK_V4=''
+TF_DEVICE_V4=''
+TF_NETWORK_V6=''
+TF_DEVICE_V6=''
+PROCD_JSON_CONTEXT=intact
+if start_service; then
+	echo "FakeSIP auto mode started without any official WAN" >&2
+	exit 1
+fi
+[ -z "$COMMAND_ARGS" ] && [ -z "$NETDEVS" ]
+[ "$PROCD_JSON_CONTEXT" = intact ] || {
+	echo "FakeSIP no-WAN validation destroyed the parent procd JSON context" >&2
+	exit 1
+}
+grep -Fx 'kill fakesip' "$ORDER_LOG" >/dev/null
+printf '%s\n' "$EVENTS" | grep -Fx 'cleanup fakesip' >/dev/null
+
+CFG_main_interface_mode=selected
+CFG_main_interface='wan0 wan0'
+CFG_main_family=ipv4
+tf_interface_exists() { tf_valid_interface "$1" && [ "$1" = wan0 ]; }
+: >"$LFDPI_NETWORK_CALL_LOG"
 
 COMMAND_ARGS=''
 NETDEVS=''

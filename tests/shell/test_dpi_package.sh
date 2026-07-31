@@ -13,6 +13,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 . "$SCRIPT_DIR/harness.sh"
 
 assert_file_exists "$MAKEFILE" "DPI package Makefile exists"
+WAN_RESOLVER="$DPI_DIR/files/usr/share/liquid-formula-dpi/wan-resolver.sh"
 
 # --- vendored sources are present and buildable from source ------------------
 
@@ -126,6 +127,16 @@ assert_make_top_level_not_contains "$MAKEFILE" '@TARGET_' \
 	"the merged package is not pinned to a single OpenWrt target"
 assert_contains "$MAKEFILE" 'kmod-nft-queue' "the merged package depends on the NFQUEUE kernel module"
 assert_contains "$MAKEFILE" 'libnetfilter-queue' "the merged package depends on libnetfilter-queue"
+
+# WAN auto-detection is a packaged runtime helper, not test-only logic. It is
+# installed executable because both init scripts and hotplug source it on a
+# router restored from a GitHub web upload.
+assert_file_exists "$WAN_RESOLVER" "shared official WAN resolver is packaged"
+assert_make_block_contains \
+	"$MAKEFILE" \
+	'Package/liquid-formula/install' \
+	'wan-resolver\.sh.*wan-resolver\.sh' \
+	"package install copies the shared WAN resolver"
 
 # The SDK toolchain values must reach both upstream Makefiles, which use
 # `override CFLAGS+=`, so a plain assignment here would be silently dropped.

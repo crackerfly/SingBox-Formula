@@ -9,13 +9,21 @@ REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 
 PACKAGE_DIR="$REPO_ROOT/openwrt-feed/liquid-formula"
 SOURCE_DIR=${SOURCE_DIR:-"$PACKAGE_DIR/src"}
+SUBSCRIPTION_HELPER_DIR="$PACKAGE_DIR/src-subscription-gateway"
 PACKAGE_MAKEFILE="$PACKAGE_DIR/Makefile"
+LUCI_PACKAGE_MAKEFILE="$REPO_ROOT/openwrt-feed/luci-app-liquid-formula/Makefile"
+READINESS_WRAPPER="$PACKAGE_DIR/files/usr/share/liquid-formula/wait-subscription-gateway.sh"
 UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manifest"
 PATCHED_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.patched-paths"
 LOCAL_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-local-paths"
+TEMPLATE_HASHES="$SCRIPT_DIR/fixtures/template-1.8.4.sha256"
 UPSTREAM_COMMIT=8222509aff98229886d304ef72e1d0affb087a62
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 LUMBERJACK_MIT_SHA256=4eb222b860ec541a0f981a01de5454ba50d09d38b2d09fa6894ed0bf6331293e
+BASELINE_183_COMMIT=a60f59308847acc79d166794488149df6d08ad46
+GO_SOURCE_TREE=d4f299087af3fdb87f7728846425d48edfeb7ae4
+MOMO_TEMPLATE_SHA256=ac1648ec562b7d8e23407baeea758f3788889054f6c1bca56220534077c715c3
+LOCALDNS_TEMPLATE_SHA256=9dc80b9caf2eba67ca4b542c480a10a3f88ef8082903a3c10f31a141b1b0fbdf
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-source-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -56,6 +64,32 @@ find_elf_files() {
 		done
 	' sh {} +
 }
+
+template_sha256() {
+	awk -v name="$1" '$2 == name { print $1; exit }' "$TEMPLATE_HASHES"
+}
+
+assert_file_exists "$TEMPLATE_HASHES" "records the authoritative 1.8.4 template hashes"
+fixture_baseline_commit=$(sed -n 's/^# Liquid Formula 1.8.3 baseline commit: //p' "$TEMPLATE_HASHES")
+fixture_go_source_tree=$(sed -n 's/^# Go source tree digest: //p' "$TEMPLATE_HASHES")
+assert_equal "$BASELINE_183_COMMIT" "$fixture_baseline_commit" "records the 1.8.3 baseline commit"
+assert_equal "$GO_SOURCE_TREE" "$fixture_go_source_tree" "records the unchanged Go-source tree digest"
+assert_equal "$MOMO_TEMPLATE_SHA256" "$(template_sha256 momo-template.json)" "records the supplied momo template hash"
+assert_equal "$LOCALDNS_TEMPLATE_SHA256" "$(template_sha256 localdns-template.json)" "records the supplied local DNS template hash"
+
+baseline_go_source_tree=$(git -C "$REPO_ROOT" rev-parse "$BASELINE_183_COMMIT:openwrt-feed/liquid-formula/src" 2>/dev/null || true)
+assert_equal "$GO_SOURCE_TREE" "$baseline_go_source_tree" "maps the 1.8.3 baseline to the recorded Go-source tree"
+actual_go_source_tree=$(git -C "$REPO_ROOT" rev-parse "HEAD:openwrt-feed/liquid-formula/src" 2>/dev/null || true)
+assert_equal "$GO_SOURCE_TREE" "$actual_go_source_tree" "keeps the Go source tree at the recorded digest"
+
+assert_file_sha256 \
+	"$MOMO_TEMPLATE_SHA256" \
+	"$PACKAGE_DIR/files/www/liquid-formula/templates/momo-template.json" \
+	"ships the authoritative momo template at its packaged path"
+assert_file_sha256 \
+	"$LOCALDNS_TEMPLATE_SHA256" \
+	"$PACKAGE_DIR/files/www/liquid-formula/templates/localdns-template.json" \
+	"ships the authoritative local DNS template at its packaged path"
 
 assert_file_content \
 	"$UPSTREAM_COMMIT" \
@@ -113,6 +147,24 @@ assert_file_sha256 \
 assert_file_not_exists \
 	"$PACKAGE_DIR/files/usr/bin/sb-sub-c" \
 	"does not ship the old prebuilt converter"
+assert_file_not_exists \
+	"$PACKAGE_DIR/files/usr/bin/liquid-formula-subscription-gateway" \
+	"does not ship a prebuilt subscription gateway"
+assert_file_exists \
+	"$SUBSCRIPTION_HELPER_DIR/main.go" \
+	"ships the subscription gateway source outside the frozen converter tree"
+assert_file_exists \
+	"$SUBSCRIPTION_HELPER_DIR/normalizer.go" \
+	"ships the bounded normalizer source outside the frozen converter tree"
+assert_file_exists \
+	"$READINESS_WRAPPER" \
+	"ships the subscription-gateway readiness wrapper"
+assert_file_not_exists \
+	"$SUBSCRIPTION_HELPER_DIR/go.mod" \
+	"does not add a second Go module"
+assert_file_not_exists \
+	"$SUBSCRIPTION_HELPER_DIR/go.work" \
+	"does not add a Go workspace"
 
 ELF_FILES=$(find_elf_files "$PACKAGE_DIR")
 assert_empty "$ELF_FILES" "contains no ELF binary anywhere in the package tree"
@@ -166,8 +218,12 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.3[[:space:]]*$' \
-	"sets package version 1.8.3 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.4[[:space:]]*$' \
+	"sets main package version 1.8.4 in active top-level metadata"
+assert_make_top_level_contains \
+	"$LUCI_PACKAGE_MAKEFILE" \
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.4[[:space:]]*$' \
+	"sets LuCI package version 1.8.4 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \
@@ -186,8 +242,8 @@ assert_make_top_level_contains \
 	"sets the upstream Go module in active helper metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*GO_PKG_BUILD_PKG[[:space:]]*:=[[:space:]]*github\.com/haierkeys/singbox-subscribe-convert[[:space:]]*$' \
-	"builds the converter main package in active helper metadata"
+	'^[[:space:]]*GO_PKG_BUILD_PKG[[:space:]]*:=[[:space:]]*\$\(GO_PKG\)[[:space:]]+\$\(GO_PKG\)/cmd/liquid-formula-subscription-gateway[[:space:]]*$' \
+	"builds the converter and subscription gateway from the existing module"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*GO_PKG_INSTALL_EXTRA[[:space:]]*:=[[:space:]]*config/config\.yaml[[:space:]]*$' \
@@ -240,6 +296,11 @@ assert_make_block_contains \
 	"prepares the build directory from vendored source in Build/Prepare"
 assert_make_block_contains \
 	"$PACKAGE_MAKEFILE" \
+	'Build/Prepare' \
+	'^[[:space:]]*\$\(CP\)[[:space:]]+\./src-subscription-gateway/\.[[:space:]]+\$\(PKG_BUILD_DIR\)/cmd/liquid-formula-subscription-gateway/[[:space:]]*$' \
+	"stages the external helper below the existing module in Build/Prepare"
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
 	'Build/Compile' \
 	'^[[:space:]]*\$\(call[[:space:]]+GoPackage/Build/Compile\)[[:space:]]*$' \
 	"invokes the OpenWrt Go helper in Build/Compile"
@@ -250,9 +311,24 @@ assert_make_block_contains \
 	"materializes the target-built converter in Build/Compile"
 assert_make_block_contains \
 	"$PACKAGE_MAKEFILE" \
+	'Build/Compile' \
+	'^[[:space:]]*\$\(CP\)[[:space:]]+\$\(GO_PKG_BUILD_BIN_DIR\)/liquid-formula-subscription-gateway[[:space:]]+\$\(PKG_BUILD_DIR\)/liquid-formula-subscription-gateway[[:space:]]*$' \
+	"materializes the target-built subscription gateway in Build/Compile"
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
 	'Package/liquid-formula/install' \
 	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\$\(PKG_BUILD_DIR\)/sb-sub-c[[:space:]]+\$\(1\)/usr/bin/sb-sub-c[[:space:]]*$' \
 	"installs the target-built converter from the active install block"
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
+	'Package/liquid-formula/install' \
+	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\$\(PKG_BUILD_DIR\)/liquid-formula-subscription-gateway[[:space:]]+\$\(1\)/usr/bin/liquid-formula-subscription-gateway[[:space:]]*$' \
+	"installs the target-built subscription gateway from the active install block"
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
+	'Package/liquid-formula/install' \
+	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\./files/usr/share/liquid-formula/wait-subscription-gateway\.sh[[:space:]]+\$\(1\)/usr/share/liquid-formula/wait-subscription-gateway\.sh[[:space:]]*$' \
+	"installs the subscription-gateway readiness wrapper"
 assert_not_contains \
 	"$PACKAGE_MAKEFILE" \
 	'\./files/usr/bin/sb-sub-c' \

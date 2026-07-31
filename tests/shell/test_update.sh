@@ -7,14 +7,17 @@ REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 
 . "$SCRIPT_DIR/harness.sh"
 
-UPDATE="$REPO_ROOT/openwrt-feed/liquid-formula/files/usr/share/liquid-formula/update.sh"
+UPDATE_SOURCE="$REPO_ROOT/openwrt-feed/liquid-formula/files/usr/share/liquid-formula/update.sh"
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-update-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
+UPDATE="$TEST_TMP/update-under-test.sh"
 MOCK_BIN="$TEST_TMP/bin"
 MOCK_FUNCTIONS="$TEST_TMP/functions.sh"
 MOCK_GENERATOR="$TEST_TMP/generate-config.sh"
 MOCK_INIT="$TEST_TMP/init.sh"
+MOCK_ADVANCE_GENERATION="$TEST_TMP/advance-generation.sh"
+MOCK_FAULT_HOOK="$TEST_TMP/fault-hook.sh"
 RUNTIME="$TEST_TMP/runtime"
 TMP_ROOT="$RUNTIME/tmp"
 EVENTS="$RUNTIME/events.log"
@@ -22,10 +25,26 @@ LOG_FILE="$RUNTIME/update.log"
 LOCK_DIR="$RUNTIME/update.lock"
 OUTPUT_CONFIG="$RUNTIME/output/config.json"
 CACHE_FILE="$RUNTIME/cache/node.json"
-mkdir -p "$MOCK_BIN" "$TMP_ROOT" "$(dirname "$OUTPUT_CONFIG")" "$(dirname "$CACHE_FILE")"
+CONFIG_FILE="$RUNTIME/etc/liquid-formula/config.yaml"
+SUBSCRIPTION_STATE="$RUNTIME/var/lib/liquid-formula/subscriptions"
+CURRENT_FILE="$SUBSCRIPTION_STATE/current"
+SUBSCRIPTION_LOCK_FILE="$RUNTIME/subscription.lock"
+SUBSCRIPTION_BARRIER_FILE="$SUBSCRIPTION_LOCK_FILE.barrier"
+SUBSCRIPTION_URLS="$RUNTIME/subscription-url.list"
+GENERATION_COUNTER="$RUNTIME/generation.counter"
+FAULT_LOG="$RUNTIME/fault.log"
+mkdir -p "$MOCK_BIN" "$TMP_ROOT" "$(dirname "$OUTPUT_CONFIG")" "$(dirname "$CACHE_FILE")" \
+	"$(dirname "$CONFIG_FILE")"
 SYSTEM_CMP=$(command -v cmp)
+SYSTEM_FLOCK=$(command -v flock)
 SYSTEM_MKDIR=$(command -v mkdir)
-export SYSTEM_CMP SYSTEM_MKDIR
+export SYSTEM_CMP SYSTEM_FLOCK SYSTEM_MKDIR
+
+sed \
+	-e "s|/etc/liquid-formula/config\\.yaml|$CONFIG_FILE|g" \
+	-e "s|/var/lib/liquid-formula/subscriptions|$SUBSCRIPTION_STATE|g" \
+	"$UPDATE_SOURCE" > "$UPDATE"
+chmod 0755 "$UPDATE"
 
 cat > "$MOCK_FUNCTIONS" <<'EOF'
 config_load() {
@@ -48,6 +67,16 @@ config_get_bool() {
 	config_get "$@"
 }
 
+config_list_foreach() {
+	local section="$1" option="$2" callback="$3" key list_file item
+	key="UCI_${section}_${option}_LIST_FILE"
+	eval "list_file=\${$key:-}"
+	[ -n "$list_file" ] && [ -f "$list_file" ] || return 0
+	while IFS= read -r item || [ -n "$item" ]; do
+		"$callback" "$item" || return $?
+	done < "$list_file"
+}
+
 config_foreach() {
 	local callback="$1" type="$2" section
 	[ "$type" = template ] || return 0
@@ -62,7 +91,123 @@ EOF
 cat > "$MOCK_GENERATOR" <<'EOF'
 #!/bin/sh
 printf 'generator\n' >> "$MOCK_EVENTS"
-[ "${MOCK_GENERATOR_FAIL:-0}" != 1 ]
+printf 'generator-include-disabled:%s\n' "${SBF_INCLUDE_DISABLED_URLS:-0}" >> "$MOCK_EVENTS"
+[ "${MOCK_GENERATOR_FAIL:-0}" != 1 ] || exit 74
+printf '%s' "${MOCK_CONFIG_BODY:-gateway-config-v1}" > "$MOCK_CONFIG_FILE"
+EOF
+
+cat > "$MOCK_ADVANCE_GENERATION" <<'EOF'
+#!/bin/sh
+
+set -eu
+
+config_digest=$1
+generation_mode=${MOCK_GENERATION_MODE:-advance}
+if [ "$generation_mode" = wrong-config ]; then
+	config_digest=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+fi
+counter=1
+[ ! -f "$MOCK_GENERATION_COUNTER" ] || counter=$(cat "$MOCK_GENERATION_COUNTER")
+case "$counter" in ''|*[!0-9]*) exit 1 ;; esac
+counter=$((counter + 1))
+printf '%s\n' "$counter" > "$MOCK_GENERATION_COUNTER"
+generation=$(printf '%064d' "$counter")
+parent=
+if [ -f "$MOCK_CURRENT_FILE" ]; then
+	IFS= read -r parent < "$MOCK_CURRENT_FILE" || exit 1
+fi
+
+object="{\"outbounds\":[{\"server\":\"192.0.2.1\",\"server_port\":1080,\"tag\":\"fixture-node-$generation\",\"type\":\"socks\"}]}"
+aggregate=$object
+object_sha=$(printf '%s' "$object" | sha256sum)
+object_sha=${object_sha%% *}
+aggregate_sha=$object_sha
+object_bytes=$(printf '%s' "$object" | wc -c | tr -d '[:space:]')
+aggregate_bytes=$object_bytes
+
+mkdir -p "$MOCK_SUBSCRIPTION_STATE/objects" \
+	"$MOCK_SUBSCRIPTION_STATE/generations/$generation"
+chmod 0700 "$MOCK_SUBSCRIPTION_STATE" \
+	"$MOCK_SUBSCRIPTION_STATE/objects" \
+	"$MOCK_SUBSCRIPTION_STATE/generations" \
+	"$MOCK_SUBSCRIPTION_STATE/generations/$generation"
+if [ ! -f "$MOCK_SUBSCRIPTION_STATE/objects/$object_sha.json" ]; then
+	printf '%s' "$object" > "$MOCK_SUBSCRIPTION_STATE/objects/$object_sha.json"
+	chmod 0600 "$MOCK_SUBSCRIPTION_STATE/objects/$object_sha.json"
+fi
+
+sources=
+status_sources=
+index=0
+while IFS= read -r url || [ -n "$url" ]; do
+	index=$((index + 1))
+	url_sha=$(printf '%s' "$url" | sha256sum)
+	url_sha=${url_sha%% *}
+	source="{\"index\":$index,\"url_sha256\":\"$url_sha\",\"object_sha256\":\"$object_sha\",\"bytes\":$object_bytes,\"outbounds\":1}"
+	status_source="{\"index\":$index,\"result\":\"fresh\",\"fetch_code\":\"ok\",\"format\":\"singbox-json\",\"accepted\":1,\"skipped\":0,\"warnings\":[]}"
+	sources="${sources}${sources:+,}$source"
+	status_sources="${status_sources}${status_sources:+,}$status_source"
+done < "$MOCK_SUBSCRIPTION_URLS"
+[ "$index" -gt 0 ] || exit 1
+
+status="{\"schema\":1,\"generation\":\"$generation\",\"state\":\"fresh\",\"fresh_count\":$index,\"fallback_indices\":[],\"sources\":[$status_sources]}"
+status_sha=$(printf '%s' "$status" | sha256sum)
+status_sha=${status_sha%% *}
+manifest="{\"schema\":1,\"generation\":\"$generation\",\"parent\":\"$parent\",\"config_digest\":\"$config_digest\",\"aggregate\":{\"sha256\":\"$aggregate_sha\",\"bytes\":$aggregate_bytes,\"outbounds\":1},\"status_sha256\":\"$status_sha\",\"sources\":[$sources],\"legacy_consumed_url_sha256\":\"\"}"
+
+generation_dir="$MOCK_SUBSCRIPTION_STATE/generations/$generation"
+printf '%s' "$aggregate" > "$generation_dir/aggregate.json"
+printf '%s' "$manifest" > "$generation_dir/manifest.json"
+printf '%s' "$status" > "$generation_dir/status.json"
+chmod 0600 "$generation_dir/aggregate.json" "$generation_dir/manifest.json" "$generation_dir/status.json"
+
+case "$generation_mode" in
+	advance|advance-twice|wrong-config)
+		printf '%s\n' "$generation" > "$MOCK_CURRENT_FILE"
+		chmod 0600 "$MOCK_CURRENT_FILE"
+		;;
+	invalid-generation)
+		rm -f "$generation_dir/status.json"
+		printf '%s\n' "$generation" > "$MOCK_CURRENT_FILE"
+		chmod 0600 "$MOCK_CURRENT_FILE"
+		;;
+	*)
+		exit 2
+		;;
+esac
+
+if [ "$generation_mode" = advance-twice ]; then
+	MOCK_GENERATION_MODE=advance "$0" "$config_digest" >/dev/null
+fi
+printf '%s\n' "$generation"
+EOF
+
+cat > "$MOCK_FAULT_HOOK" <<'EOF'
+#!/bin/sh
+
+stage=${1:-}
+printf '%s\n' "$stage" >> "$MOCK_FAULT_LOG"
+printf 'fault:%s\n' "$stage" >> "$MOCK_EVENTS"
+[ "$stage" = before_final_output_rename ] || exit 97
+case "${MOCK_FINAL_RENAME_ACTION:-none}" in
+	none)
+		exit 0
+		;;
+	fail)
+		exit 74
+		;;
+	advance-same-config)
+		MOCK_GENERATION_MODE=advance "$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST" >/dev/null
+		exit $?
+		;;
+	advance-wrong-config)
+		MOCK_GENERATION_MODE=wrong-config "$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST" >/dev/null
+		exit $?
+		;;
+	*)
+		exit 98
+		;;
+esac
 EOF
 
 cat > "$MOCK_INIT" <<'EOF'
@@ -77,6 +222,7 @@ case "$1" in
 		[ "${MOCK_INIT_FAIL:-0}" != 1 ] || exit 1
 		[ -z "${MOCK_RUNNING_FILE:-}" ] || : > "$MOCK_RUNNING_FILE"
 		[ -z "${MOCK_STARTED_FILE:-}" ] || : > "$MOCK_STARTED_FILE"
+		[ "${MOCK_INIT_FAIL_AFTER_START:-0}" != 1 ] || exit 1
 		;;
 	stop)
 		[ "${MOCK_INIT_STOP_FAIL:-0}" != 1 ] || exit 1
@@ -122,6 +268,29 @@ write_body() {
 		fi
 		write_body '{"service":"singbox-subscribe-convert","version":"0.7.2-formula","status":"ok"}'
 		;;
+	*\?password=*\&template=%21liquid_formula_barrier\&refresh=1)
+		if [ -f "${MOCK_SUBSCRIPTION_BARRIER_FILE:-}" ]; then
+			printf 'barrier-refresh\n' >> "$MOCK_EVENTS"
+			printf 'barrier-mode:%s\n' \
+				"$(stat -c %a "$MOCK_SUBSCRIPTION_BARRIER_FILE" 2>/dev/null)" \
+				>> "$MOCK_EVENTS"
+			if [ "${MOCK_BARRIER_ADVANCE:-0}" = 1 ]; then
+				barrier_generation=$(
+					MOCK_GENERATION_MODE=advance \
+						"$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST"
+				) || exit 76
+				cp "$MOCK_SUBSCRIPTION_STATE/generations/$barrier_generation/aggregate.json" \
+					"$MOCK_CACHE_FILE" || exit 77
+			fi
+		fi
+		code=${MOCK_BARRIER_HTTP_CODE:-400}
+		barrier_body=${MOCK_BARRIER_BODY:-"Template Error: template '!liquid_formula_barrier' not found in configuration"}
+		if [ -n "$output" ]; then
+			printf '%s' "$barrier_body" > "$output"
+		else
+			printf '%s' "$barrier_body"
+		fi
+		;;
 	*/refresh\?*)
 		[ -n "${MOCK_ENTERED_FILE:-}" ] && : > "$MOCK_ENTERED_FILE"
 		while [ -n "${MOCK_HOLD_FILE:-}" ] && [ -e "$MOCK_HOLD_FILE" ]; do sleep 0.05; done
@@ -129,13 +298,64 @@ write_body() {
 		code=${MOCK_REFRESH_HTTP_CODE:-200}
 		case "$code" in
 			401) write_body 'Password Error' ;;
-			2??) write_body '{"status":"success"}' ;;
-			*) write_body '{"status":"error","errors":["mock upstream failure"]}' ;;
+			2??)
+				case "${MOCK_GENERATION_MODE:-advance}" in
+					advance|advance-twice|wrong-config|invalid-generation)
+						served_generation=$(
+							"$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST"
+						) || exit 70
+						if [ "${MOCK_SKIP_CACHE_WRITE:-0}" != 1 ]; then
+							cp "$MOCK_SUBSCRIPTION_STATE/generations/$served_generation/aggregate.json" \
+								"$MOCK_CACHE_FILE" || exit 75
+							chmod 0644 "$MOCK_CACHE_FILE" || exit 75
+						fi
+						;;
+					no-advance)
+						;;
+					missing-current)
+						rm -f "$MOCK_CURRENT_FILE"
+						;;
+					invalid-current)
+						printf 'not-a-generation\n' > "$MOCK_CURRENT_FILE"
+						chmod 0600 "$MOCK_CURRENT_FILE"
+						;;
+					*)
+						exit 71
+						;;
+				esac
+				write_body '{"status":"success"}'
+				;;
+			*) write_body '{"service":"liquid-formula-subscription-gateway","status":"error","code":"source_unavailable","failure_stage":"source_fetch","fetch_code":"http_status","source_index":2,"preserved":true}' ;;
 		esac
 		;;
 	*)
 		[ "${MOCK_FETCH_FAIL:-0}" != 1 ] || exit 22
-		write_body "{\"outbounds\":[{\"tag\":\"${MOCK_GENERATED_SERIAL:-generated}\"}]}"
+		served_generation=
+		if [ "${MOCK_BIND_OUTPUT_TO_GENERATION:-0}" = 1 ]; then
+			IFS= read -r served_generation < "$MOCK_CURRENT_FILE" || exit 74
+			printf 'served-generation:%s\n' "$served_generation" >> "$MOCK_EVENTS"
+		fi
+		case "${MOCK_AFTER_FETCH_GENERATION_MODE:-none}" in
+			none)
+				;;
+			advance|wrong-config|invalid-generation)
+				MOCK_GENERATION_MODE=$MOCK_AFTER_FETCH_GENERATION_MODE \
+					"$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST" >/dev/null || exit 72
+				;;
+			missing-current)
+				rm -f "$MOCK_CURRENT_FILE"
+				;;
+			invalid-current)
+				printf 'not-a-generation\n' > "$MOCK_CURRENT_FILE"
+				chmod 0600 "$MOCK_CURRENT_FILE"
+				;;
+			*)
+				exit 73
+				;;
+		esac
+		generated_serial=${MOCK_GENERATED_SERIAL:-generated}
+		[ -z "$served_generation" ] || generated_serial="generation-$served_generation"
+		write_body "{\"outbounds\":[{\"tag\":\"$generated_serial\"}]}"
 		;;
 esac
 [ "$want_code" = 1 ] && printf '%s' "$code"
@@ -146,6 +366,19 @@ cat > "$MOCK_BIN/cmp" <<'EOF'
 #!/bin/sh
 [ "${MOCK_CMP_FAIL:-0}" != 1 ] || exit 2
 exec "$SYSTEM_CMP" "$@"
+EOF
+
+cat > "$MOCK_BIN/flock" <<'EOF'
+#!/bin/sh
+if [ "${MOCK_FLOCK_REPLACE_PATH:-0}" = 1 ] &&
+   [ "$1" = -n ] && [ ! -e "$MOCK_FLOCK_REPLACED" ]; then
+	mv "$SBF_SUBSCRIPTION_LOCK_FILE" "$SBF_SUBSCRIPTION_LOCK_FILE.opened" ||
+		exit 70
+	: > "$SBF_SUBSCRIPTION_LOCK_FILE" || exit 71
+	chmod 0600 "$SBF_SUBSCRIPTION_LOCK_FILE" || exit 72
+	: > "$MOCK_FLOCK_REPLACED"
+fi
+exec "$SYSTEM_FLOCK" "$@"
 EOF
 
 cat > "$MOCK_BIN/mkdir" <<'EOF'
@@ -184,6 +417,33 @@ case "$expression" in
 		[ "${MOCK_JSON_FAIL:-0}" != 1 ] || exit 1
 		grep -q '"outbounds"' "$file"
 		;;
+	'@.schema')
+		sed -n 's/.*"schema":\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1
+		;;
+	'@.generation')
+		sed -n 's/.*"generation":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
+	'@.parent')
+		sed -n 's/.*"parent":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
+	'@.config_digest')
+		sed -n 's/.*"config_digest":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
+	'@.aggregate.sha256')
+		sed -n 's/.*"aggregate":{"sha256":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
+	'@.aggregate.bytes')
+		sed -n 's/.*"aggregate":{"sha256":"[^"]*","bytes":\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1
+		;;
+	'@.aggregate.outbounds')
+		sed -n 's/.*"aggregate":{"sha256":"[^"]*","bytes":[0-9][0-9]*,"outbounds":\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1
+		;;
+	'@.status_sha256')
+		sed -n 's/.*"status_sha256":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
+	'@.state')
+		sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+		;;
 	*) exit 1 ;;
 esac
 EOF
@@ -200,8 +460,9 @@ printf 'install:%s\n' "$*" >> "$MOCK_EVENTS"
 exit 99
 EOF
 
-chmod 0755 "$MOCK_GENERATOR" "$MOCK_INIT" "$MOCK_BIN/curl" "$MOCK_BIN/jsonfilter" \
-	"$MOCK_BIN/sing-box" "$MOCK_BIN/install" "$MOCK_BIN/cmp" "$MOCK_BIN/mkdir"
+chmod 0755 "$MOCK_GENERATOR" "$MOCK_INIT" "$MOCK_ADVANCE_GENERATION" "$MOCK_FAULT_HOOK" \
+	"$MOCK_BIN/curl" "$MOCK_BIN/jsonfilter" "$MOCK_BIN/sing-box" "$MOCK_BIN/install" \
+	"$MOCK_BIN/cmp" "$MOCK_BIN/flock" "$MOCK_BIN/mkdir"
 
 export PATH="$MOCK_BIN:$PATH"
 export SBF_FUNCTIONS_SH="$MOCK_FUNCTIONS"
@@ -210,38 +471,99 @@ export SBF_INIT_SCRIPT="$MOCK_INIT"
 export SBF_LOG_FILE="$LOG_FILE"
 export SBF_LOCK_DIR="$LOCK_DIR"
 export SBF_LIFECYCLE_LOCK_DIR="$RUNTIME/lifecycle.lock"
+export SBF_SUBSCRIPTION_LOCK_FILE="$SUBSCRIPTION_LOCK_FILE"
+export SBF_SUBSCRIPTION_BARRIER_FILE="$SUBSCRIPTION_BARRIER_FILE"
 export SBF_TMP_ROOT="$TMP_ROOT"
+export SBF_TEST_FAULT_HOOK="$MOCK_FAULT_HOOK"
 export MOCK_EVENTS="$EVENTS"
+export MOCK_CONFIG_FILE="$CONFIG_FILE"
+export MOCK_SUBSCRIPTION_STATE="$SUBSCRIPTION_STATE"
+export MOCK_CACHE_FILE="$CACHE_FILE"
+export MOCK_CURRENT_FILE="$CURRENT_FILE"
+export MOCK_SUBSCRIPTION_URLS="$SUBSCRIPTION_URLS"
+export MOCK_GENERATION_COUNTER="$GENERATION_COUNTER"
+export MOCK_ADVANCE_GENERATION="$MOCK_ADVANCE_GENERATION"
+export MOCK_FAULT_LOG="$FAULT_LOG"
+export MOCK_SUBSCRIPTION_BARRIER_FILE="$SUBSCRIPTION_BARRIER_FILE"
+export MOCK_FLOCK_REPLACED="$RUNTIME/flock-replaced"
 
 reset_mocks() {
-	rm -rf "$TMP_ROOT" "$LOCK_DIR" "$SBF_LIFECYCLE_LOCK_DIR"
-	mkdir -p "$TMP_ROOT" "$(dirname "$OUTPUT_CONFIG")" "$(dirname "$CACHE_FILE")"
+	rm -rf "$TMP_ROOT" "$LOCK_DIR" "$SBF_LIFECYCLE_LOCK_DIR" "$SUBSCRIPTION_STATE"
+	rm -f "$SUBSCRIPTION_URLS" "$GENERATION_COUNTER" "$FAULT_LOG" "$CONFIG_FILE" \
+		"$SUBSCRIPTION_LOCK_FILE" "$SUBSCRIPTION_LOCK_FILE.opened" \
+		"$SUBSCRIPTION_BARRIER_FILE" "$MOCK_FLOCK_REPLACED"
+	mkdir -p "$TMP_ROOT" "$(dirname "$OUTPUT_CONFIG")" "$(dirname "$CACHE_FILE")" \
+		"$(dirname "$CONFIG_FILE")"
 	: > "$EVENTS"
+	printf '%s\n' \
+		'https://provider.example/sub?token=complete-secret' \
+		'https://backup.example/sub?token=backup-secret' \
+		'https://provider.example/sub?token=complete-secret' > "$SUBSCRIPTION_URLS"
 	export UCI_main_port=9716
 	export UCI_main_enabled=0
 	export UCI_main_password='p@ss word&complete'
 	export UCI_main_subscription_url='https://provider.example/sub?token=complete-secret'
+	export UCI_main_subscription_url_LIST_FILE="$SUBSCRIPTION_URLS"
 	export UCI_main_subscription_timeout=60
 	export UCI_main_default_template='momo template'
+	export UCI_main_cache_dir="$(dirname "$CACHE_FILE")"
 	export UCI_main_output_config="$OUTPUT_CONFIG"
+	export UCI_TEMPLATE_IDS=momo_template
+	export UCI_momo_template_enabled=1
 	export MOCK_CONFIG_LOAD_FAIL=0
 	export MOCK_GENERATOR_FAIL=0
 	export MOCK_INIT_FAIL=0
+	export MOCK_INIT_FAIL_AFTER_START=0
 	export MOCK_INIT_STOP_FAIL=0
 	export MOCK_HEALTH_FAIL=0
 	export MOCK_HEALTH_ALWAYS_FAIL=0
 	export MOCK_CMP_FAIL=0
+	export MOCK_FLOCK_REPLACE_PATH=0
 	export MOCK_KILL_AFTER_LOCK_CLAIM=0
 	export MOCK_REFRESH_FAIL=0
 	export MOCK_FETCH_FAIL=0
 	export MOCK_JSON_FAIL=0
 	export MOCK_SING_FAIL=0
+	export MOCK_GENERATION_MODE=advance
+	export MOCK_AFTER_FETCH_GENERATION_MODE=none
+	export MOCK_FINAL_RENAME_ACTION=none
+	export MOCK_BIND_OUTPUT_TO_GENERATION=0
+	export MOCK_SKIP_CACHE_WRITE=0
+	export MOCK_BARRIER_ADVANCE=0
+	export MOCK_BARRIER_HTTP_CODE=400
+	unset MOCK_BARRIER_BODY 2>/dev/null || true
+	export MOCK_CONFIG_BODY=gateway-config-v1
 	export MOCK_GENERATED_SERIAL=generated
 	export MOCK_STARTED_FILE="$RUNTIME/converter.started"
 	export MOCK_RUNNING_FILE="$RUNTIME/converter.running"
+	printf '%s' "$MOCK_CONFIG_BODY" > "$CONFIG_FILE"
+	MOCK_CONFIG_DIGEST=$(sha256sum "$CONFIG_FILE")
+	MOCK_CONFIG_DIGEST=${MOCK_CONFIG_DIGEST%% *}
+	export MOCK_CONFIG_DIGEST
+	MOCK_GENERATION_MODE=advance "$MOCK_ADVANCE_GENERATION" "$MOCK_CONFIG_DIGEST" >/dev/null || exit 1
+	INITIAL_GENERATION=$(cat "$CURRENT_FILE")
+	cp "$SUBSCRIPTION_STATE/generations/$INITIAL_GENERATION/aggregate.json" "$CACHE_FILE" || exit 1
+	chmod 0644 "$CACHE_FILE" || exit 1
 	rm -f "$MOCK_STARTED_FILE" "$MOCK_RUNNING_FILE"
 	unset MOCK_HOLD_FILE MOCK_ENTERED_FILE 2>/dev/null || true
 	unset SBF_STARTUP_WAIT_LIMIT 2>/dev/null || true
+	unset SBF_SUBSCRIPTION_LOCK_WAIT_LIMIT 2>/dev/null || true
+	unset MOCK_REFRESH_HTTP_CODE 2>/dev/null || true
+}
+
+assert_cache_matches_current() {
+	local description="$1" generation expected_hash
+	generation=$(cat "$CURRENT_FILE") || {
+		record_failure "$description (cannot read current generation)"
+		return
+	}
+	expected_hash=$(sha256sum \
+		"$SUBSCRIPTION_STATE/generations/$generation/aggregate.json") || {
+			record_failure "$description (cannot hash selected aggregate)"
+			return
+		}
+	expected_hash=${expected_hash%% *}
+	assert_file_sha256 "$expected_hash" "$CACHE_FILE" "$description"
 }
 
 run_update() {
@@ -281,25 +603,127 @@ reset_mocks
 expect_update_success refresh "refresh succeeds against a healthy converter"
 assert_equal 0 "$(event_count '^generator$')" "refresh never invokes the config generator"
 assert_contains "$EVENTS" '/refresh\?password=p%40ss%20word%26complete' "refresh preserves the complete percent-encoded password"
-assert_contains "$EVENTS" '--max-time 180' "refresh budgets the node fetch plus every enabled template"
+assert_contains "$EVENTS" '--max-time 360' "refresh budgets all three ordered URL occurrences plus every enabled template"
+assert_not_equal "$INITIAL_GENERATION" "$(cat "$CURRENT_FILE")" "refresh advances current to a newly committed generation"
+assert_equal 1 "$(event_count '^barrier-refresh$')" "refresh synchronizes converter memory after pinning the new generation"
+assert_contains "$EVENTS" '^barrier-mode:600$' "refresh publishes a mode-0600 synchronization barrier"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "refresh removes its synchronization barrier before returning"
 assert_contains "$UPDATE" 'startup_wait=.*request_timeout' "temporary startup wait derives from the same dynamic request budget"
 assert_not_contains "$UPDATE" 'while \[ "\$i" -lt 20 \]' "temporary startup no longer has a fixed 20-second ceiling"
+assert_contains "$UPDATE" 'flock -n -x 8' "subscription generation lock acquisition is nonblocking and cancellable"
+assert_contains "$UPDATE" 'subscription_lock_fd_identity' "subscription generation lock validates the opened file identity"
 
-# 客户端必须比服务端等得久。generate-config.sh 给服务端的 write_timeout 是
-# sub_timeout*(启用模板数+1)+30, 客户端少等一秒都会让界面误报失败。
+reset_mocks
+: > "$SUBSCRIPTION_URLS"
+export UCI_main_enabled=0
+expect_update_success generate \
+	"generate allows the documented zero-source configuration while disabled"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+	"disabled zero-source generation reaches only the scrubbed generator path"
+
+for invalid_subscription_url in \
+	'http://?query' \
+	'https:///path' \
+	'http://:80/sub' \
+	'http://user@:80/sub' \
+	'https://exa%6Dple.com/sub' \
+	'https://user[bad]@provider.example/sub' \
+	'https://provider|invalid.example/sub' \
+	'https://[x:y]/sub' \
+	'https://[::::]/sub' \
+	'https://[2001::db8::1]/sub' \
+	'https://provider.example/raw space' \
+	'https://provider.example/sub ' \
+	'https://provider.example/%zz' \
+	"https://provider.example/sub$(printf '\177')"; do
+	reset_mocks
+	printf '%s\n' "$invalid_subscription_url" > "$SUBSCRIPTION_URLS"
+	expect_update_failure generate \
+		"generate rejects invalid subscription URL before side effects: $invalid_subscription_url"
+	assert_equal 0 "$(event_count '^generator')" \
+		"invalid subscription URL never reaches generator: $invalid_subscription_url"
+	assert_equal 0 "$(event_count '^curl:')" \
+		"invalid subscription URL never reaches curl: $invalid_subscription_url"
+done
+
+for valid_subscription_url in \
+	'HTTPS://provider.example/sub' \
+	'https://user:pass@provider.example/sub' \
+	'https://[2001:db8::1]/sub' \
+	'https://[::ffff:192.0.2.1]/sub' \
+	'https://[fe80::1%25eth0]/sub' \
+	'https://provider.example:0/sub' \
+	'https://provider.example:65536/sub' \
+	'https://provider.example/sub#fragment' \
+	'https://provider.example/sub?opaque=%zz' \
+	'https://provider.example/escaped%20space'; do
+	reset_mocks
+	printf '%s\n' "$valid_subscription_url" > "$SUBSCRIPTION_URLS"
+	expect_update_success generate \
+		"generate accepts backend-valid subscription URL: $valid_subscription_url"
+	assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+		"backend-valid subscription URL reaches generator unchanged: $valid_subscription_url"
+done
+
+reset_mocks
+: > "$SUBSCRIPTION_LOCK_FILE"
+chmod 0600 "$SUBSCRIPTION_LOCK_FILE"
+exec 7<> "$SUBSCRIPTION_LOCK_FILE"
+flock -x 7
+export SBF_SUBSCRIPTION_LOCK_WAIT_LIMIT=1
+expect_update_failure refresh "refresh stops after the bounded subscription lock wait"
+assert_contains "$LOG_FILE" 'timed out waiting for the subscription generation lock' "bounded lock timeout records a specific failure"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "lock timeout cannot publish a synchronization barrier"
+flock -u 7
+exec 7>&-
+
+reset_mocks
+export MOCK_FLOCK_REPLACE_PATH=1
+expect_update_failure check "check rejects a subscription lock path replaced after open"
+assert_contains "$LOG_FILE" 'subscription lock identity changed while acquiring it' "lock replacement reports the identity mismatch"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "replaced lock path cannot publish a synchronization barrier"
+
+reset_mocks
+printf 'v1\n' > "$SUBSCRIPTION_BARRIER_FILE"
+chmod 0600 "$SUBSCRIPTION_BARRIER_FILE"
+expect_update_success refresh "refresh safely recovers a valid marker left by an interrupted updater"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "recovered stale marker is removed after synchronization"
+
+# The updater uses the same checked formulas as the generated server:
+# A=S*T+60 and R=A+E*T+60. URL occurrences, including exact duplicates, count
+# toward S; every enabled template counts toward E.
 reset_mocks
 export UCI_TEMPLATE_IDS='momo_template second_template'
 export UCI_second_template_enabled=1
 expect_update_success refresh "refresh succeeds with a second enabled template"
-assert_contains "$EVENTS" '--max-time 240' "the client budget grows with each enabled template"
+assert_contains "$EVENTS" '--max-time 420' "the client budget grows by one source timeout for each enabled template"
 unset UCI_TEMPLATE_IDS UCI_second_template_enabled
 
 reset_mocks
 export UCI_TEMPLATE_IDS='momo_template second_template'
 export UCI_second_template_enabled=0
 expect_update_success refresh "refresh succeeds with a disabled second template"
-assert_contains "$EVENTS" '--max-time 180' "a disabled template costs no client budget"
+assert_contains "$EVENTS" '--max-time 360' "a disabled template costs no client budget"
 unset UCI_TEMPLATE_IDS UCI_second_template_enabled
+
+reset_mocks
+: > "$SUBSCRIPTION_URLS"
+i=1
+while [ "$i" -le 8 ]; do
+	printf 'https://provider.example/sub-%s?token=secret-%s\n' "$i" "$i" >> "$SUBSCRIPTION_URLS"
+	i=$((i + 1))
+done
+UCI_TEMPLATE_IDS=
+i=1
+while [ "$i" -le 12 ]; do
+	UCI_TEMPLATE_IDS="${UCI_TEMPLATE_IDS}${UCI_TEMPLATE_IDS:+ }template_$i"
+	eval "UCI_template_${i}_enabled=1"
+	eval "export UCI_template_${i}_enabled"
+	i=$((i + 1))
+done
+export UCI_TEMPLATE_IDS UCI_main_subscription_timeout=600
+expect_update_success refresh "refresh accepts an uncapped eight-source, twelve-template request budget"
+assert_contains "$EVENTS" '--max-time 12120' "request budget is not truncated by the obsolete 3660-second cap"
 
 # Check / Update 在服务关着时会临时把转换器拉起来。既然是临时的, 结束后必须
 # 停掉, 否则界面会停在 "Autostart: Off / Status: Running"。
@@ -317,10 +741,43 @@ else
 fi
 unset MOCK_HEALTH_FAIL
 
+# A failed temporary start happens after the private manual configuration was
+# generated. Since no converter is running, cleanup must still restore the
+# disabled at-rest configuration instead of leaving saved URLs exposed there.
+reset_mocks
+export MOCK_HEALTH_FAIL=1 MOCK_INIT_FAIL=1
+expect_update_failure check "check reports a failed temporary converter start"
+assert_equal 1 "$(event_count '^generator-include-disabled:1$')" \
+	"failed temporary start first generates the explicit manual configuration"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+	"failed temporary start restores the disabled at-rest configuration"
+assert_file_not_exists "$MOCK_RUNNING_FILE" \
+	"failed temporary start leaves no converter running"
+unset MOCK_HEALTH_FAIL MOCK_INIT_FAIL
+
+# procd may publish the instance and then report failure while closing the
+# service transaction. Since this invocation caused the running process, it
+# must retain temporary ownership long enough to stop it and scrub the file.
+reset_mocks
+export MOCK_HEALTH_FAIL=1 MOCK_INIT_FAIL_AFTER_START=1
+expect_update_failure check \
+	"check cleans a converter published by a partially failed temporary start"
+assert_contains "$MOCK_EVENTS" '^init:stop$' \
+	"partial temporary start failure is stopped with this invocation's ownership"
+assert_file_not_exists "$MOCK_RUNNING_FILE" \
+	"partial temporary start failure leaves no converter running"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+	"partial temporary start failure restores the scrubbed configuration"
+unset MOCK_HEALTH_FAIL MOCK_INIT_FAIL_AFTER_START
+
 # 服务本来就在跑的时候不许去动它。
 reset_mocks
 expect_update_success check "check succeeds against an already running converter"
 assert_not_contains "$MOCK_EVENTS" '^init:stop$' "check leaves an already running converter alone"
+assert_equal 1 "$(event_count '^generator-include-disabled:1$')" \
+	"disabled check gives an existing converter the manual source configuration"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+	"disabled check restores the scrubbed file without stopping an existing converter"
 
 # procd 已经报告 running 但健康端点暂时未就绪时，这个 updater 没有进程 ownership。
 # 它可以等待并失败，但绝不能把别的调用者启动的服务当成自己的临时实例停掉。
@@ -365,6 +822,8 @@ export MOCK_HEALTH_FAIL=1 MOCK_INIT_STOP_FAIL=1
 expect_update_failure check "check reports failure when its temporary converter cannot be stopped"
 assert_contains "$LOG_FILE" 'failed to stop the converter that this run started' "records a temporary converter stop failure"
 assert_file_exists "$MOCK_RUNNING_FILE" "failed stop leaves the mock converter state visible"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" \
+	"failed temporary stop still restores the scrubbed on-disk configuration"
 
 # 输出路径若已是同名目录, mv 会把临时文件搬进去并成功返回, Update 就会报成功
 # 而实际什么也没产出。
@@ -392,9 +851,19 @@ unset MOCK_REFRESH_HTTP_CODE
 
 reset_mocks
 export MOCK_REFRESH_HTTP_CODE=500
+failed_generation_before=$(cat "$CURRENT_FILE")
+failed_status_before=$(sha256sum "$SUBSCRIPTION_STATE/generations/$failed_generation_before/status.json")
+failed_status_before=${failed_status_before%% *}
 expect_update_failure refresh "refresh fails when the converter returns a server error"
 assert_contains "$LOG_FILE" 'HTTP 500' "records the 500 status in the update log"
-assert_contains "$LOG_FILE" 'mock upstream failure' "records the converter response body in the update log"
+assert_contains "$LOG_FILE" 'source_unavailable' "records the bounded gateway failure code"
+assert_contains "$LOG_FILE" '"failure_stage":"source_fetch"' "records the bounded gateway failure stage"
+assert_contains "$LOG_FILE" '"fetch_code":"http_status"' "records the bounded source fetch classification"
+assert_contains "$LOG_FILE" '"source_index":2' "records the failed ordered source index"
+assert_contains "$LOG_FILE" '"preserved":true' "records that the prior complete generation was preserved"
+assert_not_contains "$LOG_FILE" 'provider\.example|backup\.example|complete-secret|backup-secret|momo template' "failure diagnostics never log source URLs, tokens, or node names"
+assert_file_content "$failed_generation_before" "$CURRENT_FILE" "complete refresh failure keeps the selected generation"
+assert_file_sha256 "$failed_status_before" "$SUBSCRIPTION_STATE/generations/$failed_generation_before/status.json" "complete refresh failure keeps immutable selected status"
 unset MOCK_REFRESH_HTTP_CODE
 
 reset_mocks
@@ -409,6 +878,60 @@ expect_update_success refresh "a second refresh succeeds"
 second_refresh_output=$(sed -n 's/^output:\(.*refresh.*\.json\)$/\1/p' "$EVENTS" | tail -n 1)
 assert_not_equal "$first_refresh_output" "$second_refresh_output" "uses a unique refresh response path per operation"
 
+# Every converter refresh flow must observe a newly selected, fully valid
+# generation for this exact generated-config digest. A stale converter snapshot
+# is not success even when the converter HTTP endpoint itself returned 2xx.
+for command in refresh check apply; do
+	for generation_mode in no-advance missing-current invalid-current wrong-config invalid-generation; do
+		reset_mocks
+		printf 'old-output\n' > "$OUTPUT_CONFIG"
+		export MOCK_GENERATION_MODE=$generation_mode
+		expect_update_failure \
+			"$command" \
+			"$command rejects generation state: $generation_mode"
+		assert_file_content \
+			old-output \
+			"$OUTPUT_CONFIG" \
+			"$command preserves installed output for generation state: $generation_mode"
+	done
+done
+
+reset_mocks
+export MOCK_GENERATION_MODE=advance-twice
+expect_update_failure refresh "refresh rejects a concurrent generation whose converter snapshot was not committed"
+assert_not_equal "$INITIAL_GENERATION" "$(cat "$CURRENT_FILE")" "concurrent same-config winner leaves a newer valid current"
+
+reset_mocks
+export MOCK_SKIP_CACHE_WRITE=1
+expect_update_failure refresh "refresh rejects a generation whose converter cache was not committed"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "failed refresh removes its synchronization barrier"
+
+reset_mocks
+export MOCK_BARRIER_HTTP_CODE=500
+expect_update_failure check "check rejects an unexpected synchronization sentinel response"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "unexpected sentinel response is cleaned after failure"
+
+reset_mocks
+export MOCK_BARRIER_BODY="Template Error: template 'attacker' not found in configuration"
+expect_update_failure check "check rejects a nonexact synchronization sentinel body"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "invalid sentinel content is cleaned after failure"
+
+reset_mocks
+printf 'old-output\n' > "$OUTPUT_CONFIG"
+export MOCK_BARRIER_ADVANCE=1
+expect_update_failure apply "apply rejects a pre-existing refresh that finishes after the generation was pinned"
+assert_file_content old-output "$OUTPUT_CONFIG" "late refresh completion preserves installed output"
+assert_file_not_exists "$SUBSCRIPTION_BARRIER_FILE" "late-refresh failure removes its synchronization barrier"
+
+reset_mocks
+printf 'unsafe\n' > "$RUNTIME/barrier-target"
+ln -s "$RUNTIME/barrier-target" "$SUBSCRIPTION_BARRIER_FILE"
+expect_update_failure check "check refuses an unsafe synchronization barrier path"
+[ -L "$SUBSCRIPTION_BARRIER_FILE" ] &&
+	record_ok "unsafe barrier symlink is not followed or replaced" ||
+	record_failure "unsafe barrier symlink is not followed or replaced"
+rm -f "$SUBSCRIPTION_BARRIER_FILE"
+
 reset_mocks
 export MOCK_HEALTH_FAIL=1
 expect_update_failure refresh "refresh fails when a disabled converter is stopped"
@@ -419,7 +942,9 @@ assert_equal 0 "$(grep -F -c '/refresh?' "$EVENTS" 2>/dev/null || true)" "stoppe
 reset_mocks
 export MOCK_HEALTH_FAIL=1
 expect_update_success check "check may auto-start a stopped disabled converter"
-assert_equal 1 "$(event_count '^generator$')" "stopped check generates converter config once"
+assert_equal 2 "$(event_count '^generator$')" "stopped disabled check generates one manual config and one scrubbed config"
+assert_equal 1 "$(event_count '^generator-include-disabled:1$')" "stopped disabled check exposes saved URLs only to its manual config"
+assert_equal 1 "$(event_count '^generator-include-disabled:0$')" "stopped disabled check restores the scrubbed at-rest config after stopping"
 assert_equal 1 "$(event_count '^init:start manual$')" "stopped check uses the exact manual procd start mode"
 
 reset_mocks
@@ -505,7 +1030,8 @@ assert_equal 8 "$busy_count" "only one of nine parallel updater calls owns the l
 rm -f "$HOLD_FILE"
 wait "$owner_job"
 refresh_calls=$(grep -F -c '/refresh?' "$EVENTS" 2>/dev/null || true)
-assert_equal 1 "$refresh_calls" "only the lock winner reaches converter refresh"
+assert_equal 1 "$refresh_calls" "only the lock winner reaches the manual refresh endpoint"
+assert_equal 1 "$(event_count '^barrier-refresh$')" "only the lock winner reaches the query-refresh synchronization fence"
 unset MOCK_HOLD_FILE MOCK_ENTERED_FILE
 
 reset_mocks
@@ -534,7 +1060,7 @@ printf 'last-known-good-cache\n' > "$CACHE_FILE"
 export MOCK_JSON_FAIL=1
 expect_update_failure apply "rejects generated data when jsonfilter fails"
 assert_file_content old-output "$OUTPUT_CONFIG" "JSON failure preserves the installed output"
-assert_file_content last-known-good-cache "$CACHE_FILE" "JSON failure preserves converter cache"
+assert_cache_matches_current "JSON failure retains the complete refreshed converter snapshot"
 assert_equal 0 "$(event_count '^sing-box:')" "does not run sing-box after JSON validation failure"
 
 reset_mocks
@@ -558,17 +1084,68 @@ assert_file_content old-output "$OUTPUT_CONFIG" "download failure preserves the 
 
 reset_mocks
 printf 'old-output\n' > "$OUTPUT_CONFIG"
+export MOCK_BIND_OUTPUT_TO_GENERATION=1 MOCK_AFTER_FETCH_GENERATION_MODE=advance
+expect_update_failure apply "apply rejects a same-config generation advance during bound output fetch"
+assert_file_content old-output "$OUTPUT_CONFIG" "fetch-time generation advance preserves installed output"
+served_generation=$(sed -n 's/^served-generation://p' "$EVENTS" | tail -n 1)
+assert_not_equal "$served_generation" "$(cat "$CURRENT_FILE")" "fetch fixture advances current beyond the generation that served output"
+
+for after_fetch_mode in wrong-config missing-current invalid-current invalid-generation; do
+	reset_mocks
+	printf 'old-output\n' > "$OUTPUT_CONFIG"
+	export MOCK_AFTER_FETCH_GENERATION_MODE=$after_fetch_mode
+	expect_update_failure \
+		apply \
+		"apply revalidates current before install: $after_fetch_mode"
+	assert_file_content \
+		old-output \
+		"$OUTPUT_CONFIG" \
+		"unstable generation state preserves output before install: $after_fetch_mode"
+done
+
+reset_mocks
+printf 'old-output\n' > "$OUTPUT_CONFIG"
+export MOCK_BIND_OUTPUT_TO_GENERATION=1 MOCK_FINAL_RENAME_ACTION=advance-same-config
+expect_update_failure apply "apply rejects a bound generation advance before atomic output replacement"
+assert_file_content old-output "$OUTPUT_CONFIG" "pre-install generation advance preserves installed output"
+served_generation=$(sed -n 's/^served-generation://p' "$EVENTS" | tail -n 1)
+assert_not_equal "$served_generation" "$(cat "$CURRENT_FILE")" "install fixture advances current beyond the generation that served output"
+
+reset_mocks
+printf 'old-output\n' > "$OUTPUT_CONFIG"
+export MOCK_FINAL_RENAME_ACTION=fail
+expect_update_failure apply "final-output fault injection aborts before atomic replacement"
+assert_file_content old-output "$OUTPUT_CONFIG" "final-output fault preserves the installed output"
+assert_file_content before_final_output_rename "$FAULT_LOG" "invokes only the named final-output fault stage"
+sing_line=$(grep -n '^sing-box:' "$EVENTS" | tail -n 1 | cut -d: -f1)
+fault_line=$(grep -n '^fault:before_final_output_rename$' "$EVENTS" | tail -n 1 | cut -d: -f1)
+if [ -n "$sing_line" ] && [ -n "$fault_line" ] && [ "$sing_line" -lt "$fault_line" ]; then
+	record_ok 'fault hook runs after generated output validation'
+else
+	record_failure 'fault hook runs after generated output validation'
+fi
+
+reset_mocks
+printf 'old-output\n' > "$OUTPUT_CONFIG"
 printf 'last-known-good-cache\n' > "$CACHE_FILE"
 export MOCK_CMP_FAIL=1 MOCK_GENERATED_SERIAL=new-output
 expect_update_failure apply "treats updater cmp I/O failure as fatal"
 assert_file_content old-output "$OUTPUT_CONFIG" "updater cmp failure preserves installed output"
-assert_file_content last-known-good-cache "$CACHE_FILE" "updater cmp failure preserves converter cache"
+assert_cache_matches_current "updater cmp failure retains the complete refreshed converter snapshot"
+
+reset_mocks
+printf 'old-output\n' > "$OUTPUT_CONFIG"
+export MOCK_SKIP_CACHE_WRITE=1
+expect_update_failure apply "rejects a converter snapshot that does not match the selected generation"
+assert_file_content old-output "$OUTPUT_CONFIG" "mismatched converter snapshot preserves installed output"
 
 reset_mocks
 printf 'old-output\n' > "$OUTPUT_CONFIG"
 export MOCK_REFRESH_FAIL=1 MOCK_GENERATED_SERIAL=from-cache
-expect_update_success apply "apply falls back to last-known-good converter data after refresh failure"
-assert_contains "$OUTPUT_CONFIG" 'from-cache' "cached fallback installs validated converter output"
+expect_update_failure apply "apply rejects a stale converter snapshot after refresh failure"
+assert_file_content old-output "$OUTPUT_CONFIG" "refresh failure preserves the installed output"
+assert_not_contains "$LOG_FILE" 'trying cached data' "updater no longer treats converter cache fallback as refresh success"
+assert_equal 0 "$(grep -c 'generated\.json' "$EVENTS" 2>/dev/null || true)" "refresh failure stops before fetching cached converter output"
 
 reset_mocks
 printf 'seed\n' > "$OUTPUT_CONFIG"
