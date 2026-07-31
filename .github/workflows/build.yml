@@ -51,6 +51,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # test_source_package.sh 和 test_subscription_normalize.sh 会用
+          # git rev-parse / git diff 去对比 1.8.3 基线提交。checkout 默认
+          # fetch-depth: 1 只带一个提交, 基线对象不在 workspace 里, 两个
+          # 断言必然失败。这个 job 需要完整历史 (.git 仅 8.7 MB)。
+          fetch-depth: 0
 
       - name: Restore executable modes after web upload
         run: sh .github/scripts/restore-executable-modes.sh "$GITHUB_WORKSPACE"
