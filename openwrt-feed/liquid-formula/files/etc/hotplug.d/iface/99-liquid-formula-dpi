@@ -5,6 +5,7 @@
 
 tf_common="${LFDPI_COMMON:-/usr/share/liquid-formula-dpi/service-common.sh}"
 tf_network_helpers="${LFDPI_NETWORK_HELPERS:-/lib/functions/network.sh}"
+tf_wan_resolver="${LFDPI_WAN_RESOLVER:-/usr/share/liquid-formula-dpi/wan-resolver.sh}"
 tf_init_dir="${LFDPI_INIT_DIR:-/etc/init.d}"
 
 tf_hotplug_log() {
@@ -30,8 +31,50 @@ tf_hotplug_device() {
 	printf '%s\n' "$resolved"
 }
 
+tf_hotplug_selected_matches() {
+	local service="$1" device="$2" iface
+
+	for iface in $(uci -q get "$service.main.interface" 2>/dev/null); do
+		[ "$iface" = "$device" ] && return 0
+	done
+	return 1
+}
+
+tf_hotplug_auto_up_device() {
+	local service="$1" family="$2" matched_device=''
+
+	[ -n "${INTERFACE:-}" ] && tf_valid_network_name "$INTERFACE" || return 1
+	tf_wan_resolve "$family" || return 1
+	if [ "$INTERFACE" = "$TF_WAN_IPV4_NETWORK" ]; then
+		matched_device="$TF_WAN_IPV4_DEVICE"
+	elif [ "$INTERFACE" = "$TF_WAN_IPV6_NETWORK" ]; then
+		matched_device="$TF_WAN_IPV6_DEVICE"
+	fi
+	tf_interface_exists "$matched_device" || return 1
+	printf '%s\n' "$matched_device"
+}
+
+tf_hotplug_auto_down_device() {
+	local service="$1" family="$2" matched_device=''
+
+	[ -n "${INTERFACE:-}" ] && tf_valid_network_name "$INTERFACE" || return 1
+	tf_wan_state_get "$service" || return 1
+	if [ "$INTERFACE" = "$TF_WAN_STORED_IPV4_NETWORK" ]; then
+		matched_device="$TF_WAN_STORED_IPV4_DEVICE"
+	elif [ "$INTERFACE" = "$TF_WAN_STORED_IPV6_NETWORK" ]; then
+		matched_device="$TF_WAN_STORED_IPV6_DEVICE"
+	fi
+	tf_valid_interface "$matched_device" || return 1
+
+	# Re-resolve after recognizing the old mapping. Do not replace the stored
+	# state here: the service needs the old device to authenticate this event
+	# before it atomically installs the surviving mapping.
+	tf_wan_resolve "$family" >/dev/null 2>&1 || true
+	printf '%s\n' "$matched_device"
+}
+
 tf_hotplug_main() {
-	local tf_command tf_device tf_service tf_mode tf_matched tf_iface
+	local tf_command tf_device tf_service tf_mode tf_family tf_network
 
 	case "${ACTION:-}" in
 		ifdown) tf_command=link_down ;;
@@ -49,39 +92,66 @@ tf_hotplug_main() {
 		# shellcheck source=/dev/null
 		. "$tf_network_helpers"
 	fi
-
-	tf_device="$(tf_hotplug_device 2>/dev/null || true)"
-	if ! tf_valid_interface "$tf_device"; then
-		tf_hotplug_log "ignoring ${ACTION:-unknown} without a uniquely resolved device"
+	[ -r "$tf_wan_resolver" ] || {
+		tf_hotplug_log "WAN resolver helper is unavailable"
 		return 0
-	fi
-	if [ "$tf_command" = link_up ] && ! tf_interface_exists "$tf_device"; then
-		tf_hotplug_log "ignoring ifup for unavailable device: $tf_device"
-		return 0
-	fi
-	if [ "$tf_command" = link_up ] && [ -n "${INTERFACE:-}" ]; then
-		tf_hotplug_device_cache_set "$INTERFACE" "$tf_device" ||
-			tf_hotplug_log "unable to cache ${INTERFACE} L3 device: $tf_device"
-	fi
+	}
+	# shellcheck source=/dev/null
+	. "$tf_wan_resolver"
 
 	for tf_service in fakehttp fakesip; do
+		tf_network=''
 		[ -x "$tf_init_dir/$tf_service" ] || continue
 		[ "$(uci -q get "$tf_service.main.enabled" 2>/dev/null)" = 1 ] || continue
 
-		tf_matched=0
 		tf_mode="$(uci -q get "$tf_service.main.interface_mode" 2>/dev/null)"
-		if [ "$tf_service" = fakehttp ] && [ "$tf_mode" = all ]; then
-			tf_matched=1
-		else
-			for tf_iface in $(uci -q get "$tf_service.main.interface" 2>/dev/null); do
-				[ "$tf_iface" = "$tf_device" ] && tf_matched=1
-			done
-		fi
+		[ -n "$tf_mode" ] || tf_mode=auto
+		case "$tf_mode" in
+			auto)
+				tf_network="${INTERFACE:-}"
+				tf_family="$(uci -q get "$tf_service.main.family" 2>/dev/null)"
+				case "$tf_family" in ipv4|ipv6|dual) ;; *) tf_family=dual ;; esac
+				if [ "$tf_command" = link_up ]; then
+					tf_device="$(tf_hotplug_auto_up_device "$tf_service" "$tf_family" 2>/dev/null || true)"
+				else
+					tf_device="$(tf_hotplug_auto_down_device "$tf_service" "$tf_family" 2>/dev/null || true)"
+				fi
+				if ! tf_valid_interface "$tf_device"; then
+					tf_hotplug_log "ignoring ${ACTION:-unknown} for unrelated or unavailable auto WAN"
+					continue
+				fi
+				;;
+			selected|all)
+				[ "$tf_service" = fakehttp ] || [ "$tf_mode" = selected ] || continue
+				tf_device="$(tf_hotplug_device 2>/dev/null || true)"
+				if ! tf_valid_interface "$tf_device"; then
+					tf_hotplug_log "ignoring ${ACTION:-unknown} without a uniquely resolved device"
+					continue
+				fi
+				if [ "$tf_command" = link_up ] && ! tf_interface_exists "$tf_device"; then
+					tf_hotplug_log "ignoring ifup for unavailable device: $tf_device"
+					continue
+				fi
+				if [ "$tf_command" = link_up ] && [ -n "${INTERFACE:-}" ]; then
+					tf_hotplug_device_cache_set "$INTERFACE" "$tf_device" ||
+						tf_hotplug_log "unable to cache ${INTERFACE} L3 device: $tf_device"
+				fi
+				if [ "$tf_mode" = selected ] &&
+				   ! tf_hotplug_selected_matches "$tf_service" "$tf_device"; then
+					continue
+				fi
+				;;
+			*) continue ;;
+		esac
 
-		[ "$tf_matched" = 1 ] || continue
-		"$tf_init_dir/$tf_service" "$tf_command" "$tf_device" >/dev/null 2>&1 || true
+		if [ -n "$tf_network" ]; then
+			"$tf_init_dir/$tf_service" "$tf_command" "$tf_device" "$tf_network" \
+				>/dev/null 2>&1 || true
+		else
+			"$tf_init_dir/$tf_service" "$tf_command" "$tf_device" >/dev/null 2>&1 || true
+		fi
 	done
 }
 
 tf_hotplug_main
-unset tf_common tf_network_helpers tf_init_dir
+unset tf_common tf_network_helpers tf_wan_resolver tf_init_dir

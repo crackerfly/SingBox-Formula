@@ -6,9 +6,11 @@ STOP=10
 
 NAME='liquid-formula'
 PROG='/usr/bin/sb-sub-c'
+GATEWAY_PROG='/usr/bin/liquid-formula-subscription-gateway'
 CONFIG='liquid_formula'
 GEN='/usr/share/liquid-formula/generate-config.sh'
 DELAY_HELPER='/usr/share/liquid-formula/run-delayed.sh'
+READINESS_HELPER='/usr/share/liquid-formula/wait-subscription-gateway.sh'
 CONF='/etc/liquid-formula/config.yaml'
 WORKDIR='/etc/liquid-formula'
 STATE_DIR=${SBF_STATE_DIR:-/var/run/liquid-formula}
@@ -22,6 +24,9 @@ LF_START_RC=0
 LF_STOP_RC=0
 LF_PROCD_CLOSE_RC=0
 LF_PROCD_KILL_RC=0
+LF_CHECKED_RESULT=0
+LF_SOURCE_COUNT=0
+LF_ENABLED_TEMPLATE_COUNT=0
 
 # OpenWrt's public procd wrappers restore the JSON namespace after invoking the
 # internal operation. Preserve the operation's status while doing the same so
@@ -309,11 +314,110 @@ lf_lifecycle_leave() {
 	LF_LIFECYCLE_EXTERNAL=0
 }
 
+lf_uint_between() {
+	local value="$1" minimum="$2" maximum="$3"
+	case "$value" in
+		''|*[!0-9]*) return 1 ;;
+		0) ;;
+		0*) return 1 ;;
+	esac
+	[ "${#value}" -le "${#maximum}" ] || return 1
+	[ "$value" -ge "$minimum" ] 2>/dev/null || return 1
+	[ "$value" -le "$maximum" ] 2>/dev/null
+}
+
+lf_checked_add_int32() {
+	local left="$1" right="$2"
+	lf_uint_between "$left" 0 2147483647 || return 1
+	lf_uint_between "$right" 0 2147483647 || return 1
+	[ "$left" -le $((2147483647 - right)) ] || return 1
+	LF_CHECKED_RESULT=$((left + right))
+}
+
+lf_checked_multiply_int32() {
+	local left="$1" right="$2"
+	lf_uint_between "$left" 0 2147483647 || return 1
+	lf_uint_between "$right" 0 2147483647 || return 1
+	if [ "$left" -eq 0 ] || [ "$right" -eq 0 ]; then
+		LF_CHECKED_RESULT=0
+		return 0
+	fi
+	[ "$left" -le $((2147483647 / right)) ] || return 1
+	LF_CHECKED_RESULT=$((left * right))
+}
+
+lf_count_subscription_source() {
+	lf_checked_add_int32 "$LF_SOURCE_COUNT" 1 || return 1
+	LF_SOURCE_COUNT=$LF_CHECKED_RESULT
+	[ "$LF_SOURCE_COUNT" -le 8 ]
+}
+
+lf_count_enabled_template() {
+	local template_enabled=1
+	config_get_bool template_enabled "$1" enabled 1
+	[ "$template_enabled" = 1 ] || return 0
+	lf_checked_add_int32 "$LF_ENABLED_TEMPLATE_COUNT" 1 || return 1
+	LF_ENABLED_TEMPLATE_COUNT=$LF_CHECKED_RESULT
+}
+
+lf_derive_runtime_values() {
+	local converter_port source_timeout source_budget template_budget
+
+	config_get boot_delay main boot_delay 90
+	config_get converter_port main port 9716
+	config_get source_timeout main subscription_timeout 60
+	lf_uint_between "$boot_delay" 0 600 || return 1
+	lf_uint_between "$converter_port" 1 65535 || return 1
+	lf_uint_between "$source_timeout" 5 600 || return 1
+
+	LF_SOURCE_COUNT=0
+	config_list_foreach main subscription_url lf_count_subscription_source || return 1
+	source_budget=$LF_SOURCE_COUNT
+	[ "$source_budget" -gt 0 ] || source_budget=1
+
+	LF_ENABLED_TEMPLATE_COUNT=0
+	config_foreach lf_count_enabled_template template || return 1
+
+	lf_checked_multiply_int32 "$source_budget" "$source_timeout" || return 1
+	lf_checked_add_int32 "$LF_CHECKED_RESULT" 60 || return 1
+	LF_AGGREGATE_BUDGET=$LF_CHECKED_RESULT
+
+	lf_checked_multiply_int32 "$LF_ENABLED_TEMPLATE_COUNT" "$source_timeout" || return 1
+	template_budget=$LF_CHECKED_RESULT
+	lf_checked_add_int32 "$LF_AGGREGATE_BUDGET" "$template_budget" || return 1
+	lf_checked_add_int32 "$LF_CHECKED_RESULT" 60 || return 1
+	LF_WAIT_BUDGET=$LF_CHECKED_RESULT
+
+	if [ "$converter_port" -eq 65535 ]; then
+		LF_GATEWAY_PORT=65534
+	else
+		lf_checked_add_int32 "$converter_port" 1 || return 1
+		LF_GATEWAY_PORT=$LF_CHECKED_RESULT
+	fi
+	LF_BOOT_DELAY=$boot_delay
+}
+
+lf_set_instance_environment() {
+	local timezone="$1" digest="$2"
+	if [ -n "$timezone" ]; then
+		procd_set_param env "TZ=$timezone" "CONFIG_DIGEST=$digest"
+	else
+		procd_set_param env "CONFIG_DIGEST=$digest"
+	fi
+}
+
+lf_set_instance_limits() {
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 30 5 5
+	procd_set_param term_timeout 5
+}
+
 lf_start_service_locked() {
 	. /lib/functions.sh
 	config_load "$CONFIG"
 
-	local mode enabled delay digest tz
+	local mode enabled digest tz
 	mode="${1:-reconcile}"
 	config_get_bool enabled main enabled 0
 
@@ -332,7 +436,11 @@ lf_start_service_locked() {
 	esac
 
 	mkdir -p /var/lib/liquid-formula/cache /var/log/liquid-formula "$WORKDIR"
-	"$GEN" >/dev/null || return 1
+	if [ "$mode" = manual ]; then
+		SBF_INCLUDE_DISABLED_URLS=1 "$GEN" >/dev/null || return 1
+	else
+		SBF_INCLUDE_DISABLED_URLS=0 "$GEN" >/dev/null || return 1
+	fi
 
 	# Reconcile always regenerates the canonical file. Publishing no instance
 	# then removes main without depending on converter executable availability.
@@ -344,13 +452,18 @@ lf_start_service_locked() {
 		echo "$PROG not found or not executable" >&2
 		return 1
 	}
-	if [ "$mode" = "boot" ]; then
-		[ -x "$DELAY_HELPER" ] || {
-			echo "$DELAY_HELPER not found or not executable" >&2
-			return 1
-		}
-		config_get delay main boot_delay 90
-	fi
+	[ -x "$GATEWAY_PROG" ] || {
+		echo "$GATEWAY_PROG not found or not executable" >&2
+		return 1
+	}
+	[ -x "$READINESS_HELPER" ] || {
+		echo "$READINESS_HELPER not found or not executable" >&2
+		return 1
+	}
+	lf_derive_runtime_values || {
+		echo "failed to derive subscription runtime budgets" >&2
+		return 1
+	}
 
 	digest="$(sha256sum "$CONF" 2>/dev/null)" || {
 		echo "failed to hash generated config: $CONF" >&2
@@ -376,21 +489,19 @@ lf_start_service_locked() {
 	rm -f /var/lib/liquid-formula/converter.version 2>/dev/null
 	tz="$(uci -q get system.@system[0].timezone 2>/dev/null)"
 
+	procd_open_instance gateway
+	procd_set_param command "$GATEWAY_PROG" serve \
+		--config "$CONF" --expected-digest "$digest"
+	lf_set_instance_environment "$tz" "$digest"
+	lf_set_instance_limits
+	procd_close_instance
+
 	procd_open_instance main
-	if [ "$mode" = "boot" ]; then
-		procd_set_param command "$DELAY_HELPER" "$delay" "$PROG" run -c "$CONF" -d "$WORKDIR"
-	else
-		procd_set_param command "$PROG" run -c "$CONF" -d "$WORKDIR"
-	fi
-	if [ -n "$tz" ]; then
-		procd_set_param env "TZ=$tz" "CONFIG_DIGEST=$digest"
-	else
-		procd_set_param env "CONFIG_DIGEST=$digest"
-	fi
-	procd_set_param stdout 1
-	procd_set_param stderr 1
-	procd_set_param respawn 30 5 5
-	procd_set_param term_timeout 5
+	procd_set_param command "$READINESS_HELPER" "$mode" "$LF_BOOT_DELAY" \
+		"$LF_GATEWAY_PORT" "$digest" "$LF_WAIT_BUDGET" -- \
+		"$PROG" run -c "$CONF" -d "$WORKDIR"
+	lf_set_instance_environment "$tz" "$digest"
+	lf_set_instance_limits
 	procd_close_instance
 }
 

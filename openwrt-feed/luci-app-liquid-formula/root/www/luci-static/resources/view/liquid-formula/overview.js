@@ -29,6 +29,39 @@ function strictResult(res) {
 	return res;
 }
 
+// Keep the template manager and the default-template ListValue on one
+// authoritative snapshot.  Do not return a partial result here: callers must
+// be able to leave both rendered structures untouched when rpcd gives us a
+// malformed response.
+function templateSnapshot(res) {
+	var ids = {};
+	if (!res || !Array.isArray(res.templates))
+		throw new Error(_('Invalid response from RPC backend.'));
+	return res.templates.map(function(template) {
+		if (!template || typeof template.id !== 'string' || !template.id ||
+		    (typeof template.enabled !== 'boolean' && template.enabled !== 0 && template.enabled !== 1) ||
+		    typeof template.name !== 'string' || typeof template.file !== 'string' ||
+		    (template.no_node != null && typeof template.no_node !== 'string') ||
+		    typeof template.size !== 'number' ||
+		    typeof template.mtime !== 'string' || ids[template.id])
+			throw new Error(_('Invalid response from RPC backend.'));
+		ids[template.id] = true;
+		return {
+			id: template.id,
+			enabled: template.enabled === true || template.enabled === 1,
+			name: template.name,
+			file: template.file,
+			no_node: template.no_node || '',
+			size: template.size,
+			mtime: template.mtime
+		};
+	});
+}
+
+function templateChoice(template) {
+	return template.name || template.id;
+}
+
 // Transient floating toast, replacing ui.addNotification: non-blocking,
 // always visible regardless of scroll position, auto-dismisses (click to
 // dismiss immediately). Errors stay longer and are tinted red.
@@ -136,6 +169,130 @@ function validateScalar(value, label) {
 	return true;
 }
 
+function validIPv4Literal(value) {
+	var octets = String(value).split('.');
+	if (octets.length !== 4)
+		return false;
+	return octets.every(function(octet) {
+		return /^(0|[1-9]\d*)$/.test(octet) && Number(octet) <= 255;
+	});
+}
+
+function validIPv6Literal(value) {
+	var text = String(value), zoneAt = text.indexOf('%25');
+	var compression, left, right, groups, units = 0;
+	if (zoneAt !== -1) {
+		if (!text.slice(zoneAt + 3) || text.slice(zoneAt + 3).indexOf('%') !== -1)
+			return false;
+		text = text.slice(0, zoneAt);
+	}
+	if (text.indexOf('%') !== -1 || text.indexOf(':') === -1 || text.indexOf(':::') !== -1)
+		return false;
+	compression = text.indexOf('::');
+	if (compression !== -1 && text.indexOf('::', compression + 2) !== -1)
+		return false;
+	if (compression === -1) {
+		left = text;
+		right = '';
+	} else {
+		left = text.slice(0, compression);
+		right = text.slice(compression + 2);
+	}
+	groups = (left ? left.split(':') : []).concat(right ? right.split(':') : []);
+	for (var i = 0; i < groups.length; i++) {
+		if (groups[i].indexOf('.') !== -1) {
+			if (i !== groups.length - 1 || !validIPv4Literal(groups[i]))
+				return false;
+			units += 2;
+		} else {
+			if (!/^[0-9A-Fa-f]{1,4}$/.test(groups[i]))
+				return false;
+			units++;
+		}
+	}
+	return compression !== -1 ? units < 8 : units === 8;
+}
+
+function validateSubscriptionURL(value) {
+	var text = String(value == null ? '' : value);
+	var rest, authority, userinfo, hostport, hostname, suffix, colon, beforeQuery, fragment;
+	var lastAt, hostEscapes, escapeMatch, escapedByte;
+	if (!text)
+		return _('Subscription URL entries must not be empty.');
+	if (/[\x00-\x20\x7f]/.test(text))
+		return _('Subscription URLs must not contain ASCII whitespace or control characters.');
+	if (!/^https?:\/\//i.test(text))
+		return _('Each subscription URL must start with http:// or https://.');
+	beforeQuery = text.split('?', 1)[0];
+	fragment = text.indexOf('#') === -1 ? '' : text.slice(text.indexOf('#') + 1);
+	if (/%(?![0-9A-Fa-f]{2})/.test(beforeQuery) ||
+	    /%(?![0-9A-Fa-f]{2})/.test(fragment))
+		return _('Subscription URLs must contain only valid percent escapes.');
+	rest = text.replace(/^https?:\/\//i, '');
+	authority = rest.split(/[\/?#]/, 1)[0];
+	if (!authority)
+		return _('Each subscription URL must contain a hostname.');
+	lastAt = authority.lastIndexOf('@');
+	userinfo = lastAt === -1 ? '' : authority.slice(0, lastAt);
+	if (userinfo && (/^[^@]*@/.test(userinfo) || /["<>\\^`{|}\[\]]/.test(userinfo)))
+		return _('The subscription URL contains invalid user information.');
+	hostport = authority.slice(lastAt + 1);
+	if (!hostport)
+		return _('Each subscription URL must contain a hostname.');
+	if (hostport.charAt(0) === '[') {
+		colon = hostport.indexOf(']');
+		if (colon <= 1)
+			return _('Each subscription URL must contain a valid bracketed hostname.');
+		hostname = hostport.slice(1, colon);
+		if (!validIPv6Literal(hostname))
+			return _('Each bracketed subscription hostname must be an IPv6 address.');
+		suffix = hostport.slice(colon + 1);
+		if (suffix && !/^:\d*$/.test(suffix))
+			return _('Each subscription URL must contain a valid numeric port.');
+	} else {
+		if (/[\[\]]/.test(hostport))
+			return _('Each subscription URL must contain a valid hostname.');
+		colon = hostport.indexOf(':');
+		if (colon === -1) {
+			hostname = hostport;
+		} else {
+			hostname = hostport.slice(0, colon);
+			suffix = hostport.slice(colon + 1);
+			if (!/^\d*$/.test(suffix))
+				return _('Each subscription URL must contain a valid numeric port.');
+		}
+		if (!hostname)
+			return _('Each subscription URL must contain a hostname.');
+	}
+	if (/["<>\\^`{|}\[\]]/.test(hostname))
+		return _('Each subscription URL must contain a valid hostname.');
+	hostEscapes = /%([0-9A-Fa-f]{2})/g;
+	while ((escapeMatch = hostEscapes.exec(hostname)) !== null) {
+		escapedByte = parseInt(escapeMatch[1], 16);
+		if (escapedByte < 0x80 && escapedByte !== 0x25)
+			return _('ASCII hostname bytes must not be percent-encoded.');
+	}
+	return true;
+}
+
+function validateSubscriptionList(values, enabled) {
+	var result;
+	if (!Array.isArray(values))
+		values = values == null ? [] : [ values ];
+	if (values.length > 8)
+		return _('At most eight subscription URLs are allowed.');
+	if (!values.length)
+		return enabled
+			? _('At least one subscription URL is required while the service is enabled.')
+			: true;
+	for (var i = 0; i < values.length; i++) {
+		result = validateSubscriptionURL(values[i]);
+		if (result !== true)
+			return result;
+	}
+	return true;
+}
+
 function validateOutputPath(value, label) {
 	var text = String(value || '');
 	var scalar = validateScalar(text, label);
@@ -189,8 +346,16 @@ return view.extend({
 
 	render: function(data) {
 		var status = data[1] || {};
-		var templates = (data[2] && data[2].templates) ? data[2].templates : [];
+		var templates = [];
 		var m, s, o;
+
+		if (data[2] && !data[2]._error) {
+			try {
+				templates = templateSnapshot(data[2]);
+			} catch (err) {
+				templates = [];
+			}
+		}
 
 		this._lastStatus = status;
 		if (data[2] && Array.isArray(data[2].templates) && !data[2]._error) {
@@ -216,16 +381,42 @@ return view.extend({
 		o.datatype = 'range(0,600)';
 		o.default = '90';
 
-		o = s.option(form.Value, 'subscription_url', _('Source subscription URL'),
-			_('Paste the link exactly as your provider gives it, including any extra query parameter your panel needs.'));
-		o.rmempty = false;
+		o = s.option(form.TextValue, 'subscription_url', _('Source subscription URLs'),
+			_('Enter one to eight provider links, one URL per line, in merge order. Duplicate links keep their positions but are downloaded only once per refresh.'));
+		o.rmempty = true;
+		o.rows = 5;
+		o.wrap = 'off';
+		o.monospace = true;
 		o.placeholder = 'https://example.com/your/subscription';
-		o.validate = function(section_id, value) {
-			if (!value)
-				return _('The subscription URL is required');
-			if (!/^https?:\/\/.+/.test(value))
-				return _('The subscription URL must start with http:// or https://');
-			return validateScalar(value, _('The subscription URL'));
+		o.cfgvalue = function(section_id) {
+			var value = uci.get('liquid_formula', section_id, 'subscription_url');
+			if (Array.isArray(value))
+				return value.join('\n');
+			return value == null ? '' : String(value);
+		};
+		o.parse = function(section_id) {
+			var text = this.formvalue(section_id);
+			var values;
+			var enabled = uci.get('liquid_formula', section_id, 'enabled');
+			var liveEnabled;
+			var match;
+			text = text == null ? '' : String(text);
+			values = text === '' ? [] : text.split(/\r?\n/);
+			if (this.map && typeof this.map.lookupOption === 'function') {
+				match = this.map.lookupOption('enabled', section_id);
+				if (match && match[0] && typeof match[1] === 'string')
+					liveEnabled = match[0].formvalue(match[1]);
+			}
+			if (liveEnabled != null)
+				enabled = liveEnabled;
+			var result = validateSubscriptionList(values, String(enabled || '0') === '1');
+			if (result !== true)
+				return Promise.reject(new TypeError(result));
+			if (values.length)
+				uci.set('liquid_formula', section_id, 'subscription_url', values);
+			else
+				uci.unset('liquid_formula', section_id, 'subscription_url');
+			return Promise.resolve(values);
 		};
 
 		o = s.option(form.Value, 'user_agent', _('Subscription User-Agent'),
@@ -277,6 +468,12 @@ return view.extend({
 		o.default = '9716';
 		o.rmempty = false;
 
+		o = s.option(form.Value, 'subscription_timeout', _('Subscription source timeout'),
+			_('Seconds allowed for each real subscription source, 5 to 600. This remains one global value for all URLs.'));
+		o.datatype = 'range(5,600)';
+		o.default = '60';
+		o.rmempty = false;
+
 		o = s.option(form.Value, 'refresh_interval', _('Subscription refresh interval'), _('Minutes, 1 to 10080 (one week). This maps to subscription.refresh_interval in config.yaml.'));
 		o.datatype = 'range(1,10080)';
 		o.default = '360';
@@ -284,13 +481,21 @@ return view.extend({
 		o = s.option(form.ListValue, 'default_template', _('Default template'),
 			_('Which template is used when a request does not specify one. It must be a template that is enabled in the Templates tab.'));
 		o.rmempty = false;
+		this._defaultTemplateOption = o;
+		this._enabledTemplateIds = {};
 		var seenTpl = {};
 		for (var i = 0; i < templates.length; i++) {
 			if (!templates[i].enabled)
 				continue;
-			o.value(templates[i].id, '%s (%s)'.format(templates[i].name || templates[i].id, templates[i].id));
+			o.value(templates[i].id, templateChoice(templates[i]));
 			seenTpl[templates[i].id] = true;
+			this._enabledTemplateIds[templates[i].id] = true;
 		}
+		o.validate = L.bind(function(section_id, value) {
+			if (this._enabledTemplateIds && this._enabledTemplateIds[value])
+				return true;
+			return _('The default template must be enabled.');
+		}, this);
 		if (!Object.keys(seenTpl).length)
 			o.placeholder = _('Enable at least one template first.');
 
@@ -336,6 +541,7 @@ return view.extend({
 		}
 
 		return m.render().then(L.bind(function(formEl) {
+			this._defaultTemplateSelect = this.findDefaultTemplateSelect(formEl);
 			// Keep the status card current without a manual page reload; paused
 			// while a button action is mid-flight so it cannot fight the spinner.
 			poll.add(L.bind(function() {
@@ -511,14 +717,29 @@ return view.extend({
 		});
 	},
 
-	// 与 rpcd 的 worker watchdog 使用同一预算。refresh 只发一次请求；check /
-	// update 还可能依次等待临时服务启动、刷新和拉取成品，因此是三段预算。
+	// 与 rpcd 的 worker watchdog 使用同一预算。refresh 需要覆盖首次刷新、
+	// subscription lock 等待和 manager 同步；check / update 还需覆盖临时服务
+	// 启动与最终成品下载。
 	// 两边不一致会让界面在合法后台动作尚未结束时提前报告“仍在运行”。
 	actionWaitSeconds: function(name) {
+		var maxInt = 2147483647;
+		var checkedAdd = function(left, right) {
+			if (!Number.isInteger(left) || !Number.isInteger(right) ||
+			    left < 0 || right < 0 || left > maxInt - right)
+				throw new Error(_('The subscription timeout budget is invalid or too large.'));
+			return left + right;
+		};
+		var checkedMultiply = function(left, right) {
+			if (!Number.isInteger(left) || !Number.isInteger(right) ||
+			    left < 0 || right < 0 ||
+			    (right !== 0 && left > Math.floor(maxInt / right)))
+				throw new Error(_('The subscription timeout budget is invalid or too large.'));
+			return left * right;
+		};
 		var rawTimeout = String(uci.get('liquid_formula', 'main', 'subscription_timeout') || '60');
 		if (!/^(?:0|[1-9][0-9]*)$/.test(rawTimeout) ||
 		    Number(rawTimeout) < 5 || Number(rawTimeout) > 600)
-			return 11160;
+			throw new Error(_('The subscription timeout budget is invalid or too large.'));
 		var timeout = Number(rawTimeout);
 		var enabled = this._enabledTemplateCount;
 		if (typeof enabled !== 'number') {
@@ -528,12 +749,22 @@ return view.extend({
 					enabled++;
 			});
 		}
-		var requestTimeout = Math.min(timeout * (enabled + 1) + 60, 3660);
+		if (!Number.isInteger(enabled) || enabled < 0 || enabled > maxInt)
+			throw new Error(_('The subscription timeout budget is invalid or too large.'));
+		var urls = uci.get('liquid_formula', 'main', 'subscription_url');
+		if (urls == null)
+			urls = [];
+		if (!Array.isArray(urls) || urls.length > 8)
+			throw new Error(_('The subscription timeout budget is invalid or too large.'));
+		var sources = Math.max(urls.length, 1);
+		var aggregateTimeout = checkedAdd(checkedMultiply(sources, timeout), 60);
+		var requestTimeout = checkedAdd(
+			checkedAdd(aggregateTimeout, checkedMultiply(enabled, timeout)), 60);
 		if (name === 'refresh')
-			return requestTimeout + 30;
+			return checkedAdd(checkedMultiply(requestTimeout, 3), 90);
 		if (name === 'check' || name === 'update')
-			return requestTimeout * 3 + 180;
-		return 11160;
+			return checkedAdd(checkedMultiply(requestTimeout, 5), 300);
+		throw new Error(_('Unknown background action.'));
 	},
 
 	waitAction: function(name) {
@@ -592,6 +823,172 @@ return view.extend({
 
 	renderStatus: function(status) {
 		return E('div', { 'id': 'sbf_status_section', 'class': 'cbi-section' }, this.statusChildren(status));
+	},
+
+	renderSubscriptionStatus: function(subscription) {
+		subscription = (subscription && typeof subscription === 'object') ? subscription : {};
+		var state = String(subscription.overall_state || 'unavailable');
+		if ([ 'empty', 'fresh', 'degraded', 'failed', 'unavailable' ].indexOf(state) < 0)
+			state = 'unavailable';
+		var integer = function(value, minimum, maximum, fallback) {
+			return Number.isInteger(value) && value >= minimum && value <= maximum
+				? value : fallback;
+		};
+		var enumValue = function(value, allowed, fallback) {
+			value = String(value || '');
+			return allowed.indexOf(value) >= 0 ? value : fallback;
+		};
+		var failureStages = [
+			'configuration', 'current_state', 'source_fetch',
+			'source_normalize', 'aggregate', 'commit', 'deadline'
+		];
+		var failureCodes = [
+			'no_sources', 'source_unavailable', 'state_invalid',
+			'aggregate_invalid', 'commit_failed'
+		];
+		var fetchCodes = [
+			'ok', 'timeout', 'http_status', 'redirect_limit',
+			'body_too_large', 'transport', 'normalize'
+		];
+		var sourceResults = [ 'fresh', 'fallback' ];
+		var sourceFormats = [
+			'singbox-json', 'base64-uri-list', 'plain-uri-list', 'clash-yaml'
+		];
+		var warningCodes = [
+			'node_not_mapping', 'missing_field', 'invalid_field',
+			'unsupported_protocol', 'unsupported_cipher', 'unsupported_plugin',
+			'unsupported_transport', 'unsupported_tls_option',
+			'unsupported_reference', 'unsupported_encryption', 'unsupported_flow',
+			'unsupported_tuic_v4', 'unsupported_socks_tls',
+			'unsupported_hysteria2_option', 'unsupported_field', 'parse_failed',
+			'node_skipped'
+		];
+		var warningTypes = [
+			'shadowsocks', 'ss', 'vmess', 'vless', 'trojan', 'hysteria2', 'hy2',
+			'tuic', 'anytls', 'socks', 'socks5', 'ssr', 'wireguard', 'direct',
+			'block', 'unknown'
+		];
+		var warningFields = [
+			'document', 'outbounds', 'proxies', 'name', 'tag', 'type', 'server',
+			'port', 'dialer-proxy', 'udp', 'cipher', 'plugin', 'uuid', 'alterId',
+			'encryption', 'flow', 'password', 'token', 'tls', 'sni', 'servername',
+			'fingerprint', 'client-fingerprint', 'alpn', 'reality-opts',
+			'public-key', 'short-id', 'network', 'transport', 'ws-opts',
+			'grpc-opts', 'http-opts', 'grpc-user-agent', 'ss-opts', 'obfs',
+			'realm', 'ports', 'hop-interval', 'username', 'references',
+			'alter-id', 'auth', 'h2-opts', 'quic-opts', 'path', 'host', 'headers',
+			'method', 'service-name', 'max-early-data', 'early-data-header-name',
+			'congestion-controller', 'congestion_control', 'udp-relay-mode',
+			'udp_relay_mode', 'field'
+		];
+		var total = integer(subscription.total_sources, 0, 8, 0);
+		var fresh = integer(subscription.fresh_count, 0, total, 0);
+		var active = /^[0-9a-f]{64}$/.test(String(subscription.active_generation || ''))
+			? String(subscription.active_generation) : '';
+		var fallback = Array.isArray(subscription.fallback_indices)
+			? subscription.fallback_indices.filter(function(index, offset, values) {
+				return Number.isInteger(index) && index >= 1 && index <= total &&
+					values.indexOf(index) === offset;
+			}).slice(0, 8) : [];
+		var sourceText = fallback.length ? fallback.join(', ') : '-';
+		var summaryClass = 'alert-message';
+		var summary;
+		if (state === 'fresh') {
+			summaryClass += ' success';
+			summary = _('All %d subscription sources are fresh.').format(total);
+		} else if (state === 'degraded') {
+			summaryClass += ' warning';
+			summary = _('Degraded: cached data is used for source indices %s.').format(sourceText);
+		} else if (state === 'failed') {
+			var attempt = (subscription.last_attempt && typeof subscription.last_attempt === 'object')
+				? subscription.last_attempt : {};
+			var failedIndex = integer(attempt.source_index, 0, total, 0);
+			var stage = enumValue(attempt.failure_stage, failureStages, 'current_state');
+			var code = enumValue(attempt.code, failureCodes, 'state_invalid');
+			var fetchCode = enumValue(attempt.fetch_code, fetchCodes, '');
+			summaryClass += ' warning';
+			summary = failedIndex > 0
+				? _('Subscription refresh failed at source %d (%s: %s%s).').format(
+					failedIndex, stage, code, fetchCode ? '/' + fetchCode : '')
+				: _('Subscription refresh failed (%s: %s).').format(stage, code);
+			summary += attempt.preserved
+				? ' ' + _('The previous complete generation was preserved.')
+				: ' ' + _('No previous complete generation was available.');
+		} else if (state === 'empty') {
+			summaryClass += ' notice';
+			summary = total > 0
+				? _('No subscription generation has been selected for the saved configuration yet.')
+				: _('No subscription source is configured.');
+		} else {
+			summaryClass += ' warning';
+			summary = _('Subscription status is unavailable. The selected metadata could not be validated.');
+		}
+
+		var children = [
+			E('h4', {}, [ _('Subscription State') ]),
+			E('div', { 'class': summaryClass }, [ summary ]),
+			E('p', { 'class': 'cbi-value-description' }, [
+				_('Sources: '), String(total),
+				' / ', _('Fresh: '), String(fresh),
+				' / ', _('Fallback indices: '), sourceText,
+				' / ', _('Active generation: '),
+				E('code', {}, [ active || '-' ])
+			])
+		];
+		if (active && !subscription.config_match)
+			children.push(E('div', { 'class': 'alert-message warning' }, [
+				_('The selected generation belongs to a different saved configuration; refresh the subscription before using it.')
+			]));
+
+		var sources = Array.isArray(subscription.sources)
+			? subscription.sources.slice(0, 8) : [];
+		if (sources.length) {
+			var rows = sources.map(function(source) {
+				source = (source && typeof source === 'object') ? source : {};
+				var index = integer(source.index, 1, 8, 0);
+				var accepted = integer(source.accepted, 0, 8192, 0);
+				var skipped = integer(source.skipped, 0, 131072, 0);
+				var warnings = Array.isArray(source.warnings)
+					? source.warnings.slice(0, 8) : [];
+				var warningText = warnings.map(function(warning) {
+					warning = (warning && typeof warning === 'object') ? warning : {};
+					var nodeIndex = integer(warning.node_index, 1, 131072, 0);
+					var warningCode = enumValue(warning.code, warningCodes, 'node_skipped');
+					var warningType = enumValue(warning.type, warningTypes, 'unknown');
+					var warningField = enumValue(warning.field, warningFields, 'field');
+					return '#' + String(nodeIndex || '?') + ' ' +
+						warningCode + ' (' + warningType + '/' + warningField + ')';
+				}).join('; ');
+				var result = enumValue(source.result, sourceResults, '-');
+				var fetch = enumValue(source.fetch_code, fetchCodes, '-');
+				var format = enumValue(source.format, sourceFormats, '-');
+				return E('tr', { 'class': 'tr cbi-section-table-row' }, [
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Source') }, [ String(index || '?') ]),
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Result') }, [ result ]),
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Fetch') }, [ fetch ]),
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Format') }, [ format ]),
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Accepted / skipped') }, [ String(accepted) + ' / ' + String(skipped) ]),
+					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Warnings') }, [ warningText || '-' ])
+				]);
+			});
+			children.push(E('table', { 'class': 'table cbi-section-table' }, [
+				E('thead', { 'class': 'thead cbi-section-thead' }, [
+					E('tr', { 'class': 'tr cbi-section-table-titles' }, [
+						E('th', { 'class': 'th' }, [ _('Source') ]),
+						E('th', { 'class': 'th' }, [ _('Result') ]),
+						E('th', { 'class': 'th' }, [ _('Fetch') ]),
+						E('th', { 'class': 'th' }, [ _('Format') ]),
+						E('th', { 'class': 'th' }, [ _('Accepted / skipped') ]),
+						E('th', { 'class': 'th' }, [ _('Warnings') ])
+					])
+				]),
+				E('tbody', { 'class': 'tbody cbi-section-tbody' }, rows)
+			]));
+		}
+		return E('div', {
+			'id': 'sbf_subscription_status',
+			'class': 'cbi-section'
+		}, children);
 	},
 
 	statusChildren: function(status) {
@@ -660,6 +1057,7 @@ return view.extend({
 				_('The converter is started and stopped by the Enable converter service switch above (Save & Apply); when settings change it is restarted automatically so they take effect. '),
 				_('Refresh, Check and Update run in the background: progress appears in the update log below and a message pops up when they finish. Refresh needs the converter already running. Check and Update will start it temporarily if it is off and stop it again when they finish, so the master switch is left as you set it. Update output file only writes the generated JSON; it does not restart sing-box. This card refreshes automatically.')
 			]),
+			this.renderSubscriptionStatus(status.subscription),
 			E('h4', {}, _('Health Check')),
 			E('pre', { 'style': 'white-space:pre-wrap; max-height: 180px; overflow:auto' }, [ health ]),
 			E('h4', {}, _('Recent Update Log')),
@@ -689,25 +1087,142 @@ return view.extend({
 		]);
 	},
 
-	// Re-fetch the template list and rebuild the table in place, so Save/Delete
-	// reflect immediately without a manual page reload.
+	findDefaultTemplateSelect: function(root) {
+		var ids = [
+			'widget.cbid.liquid_formula.main.default_template',
+			'cbid.liquid_formula.main.default_template'
+		];
+		var find = function(node) {
+			var id, i, found;
+			if (!node)
+				return null;
+			id = node.id || (node.getAttribute && node.getAttribute('id')) ||
+				(node.attributes && node.attributes.id);
+			if (ids.indexOf(id) >= 0)
+				return node;
+			for (i = 0; node.childNodes && i < node.childNodes.length; i++) {
+				found = find(node.childNodes[i]);
+				if (found)
+					return found;
+			}
+			return null;
+		};
+
+		if (this._defaultTemplateSelect &&
+		    (typeof this._defaultTemplateSelect.isConnected === 'undefined' ||
+		     this._defaultTemplateSelect.isConnected))
+			return this._defaultTemplateSelect;
+		this._defaultTemplateSelect = null;
+		var select = find(root);
+		if (!select && document.getElementById) {
+			for (var i = 0; i < ids.length && !select; i++)
+				select = document.getElementById(ids[i]);
+		}
+		return select;
+	},
+
+	stageTemplateRefresh: function(templates) {
+		var enabled = {};
+		var choices = [];
+		var displayChoices;
+		var rows = [];
+		var select = this.findDefaultTemplateSelect();
+		var tbody = document.getElementById('sbsc_tpl_tbody');
+		var currentValue;
+		var i, optionNodes;
+
+		// A refresh is all-or-nothing: never leave the table and ListValue
+		// displaying different snapshots just because one rendered target went
+		// away while an RPC request was in flight.
+		if (!tbody || !select)
+			throw new Error(_('The template list is no longer available.'));
+		currentValue = String(select.value || '');
+
+		for (i = 0; i < templates.length; i++) {
+			rows.push(this.buildTemplateRow(templates[i]));
+			if (templates[i].enabled) {
+				enabled[templates[i].id] = true;
+				choices.push({ value: templates[i].id, label: templateChoice(templates[i]) });
+			}
+		}
+		displayChoices = choices.slice();
+		if (currentValue && !enabled[currentValue])
+			displayChoices.push({
+				value: currentValue,
+				label: '%s (%s)'.format(_('Unavailable template'), currentValue),
+				disabled: true,
+				hidden: true
+			});
+
+		// Create every native option before changing either rendered structure.
+		// ui.Select has no public setChoices API in supported LuCI versions.
+		optionNodes = displayChoices.map(function(choice) {
+			var node = document.createElement('option');
+			node.value = choice.value;
+			node.disabled = !!choice.disabled;
+			node.hidden = !!choice.hidden;
+			node.textContent = choice.label;
+			return node;
+		});
+
+		return {
+			templates: templates,
+			enabled: enabled,
+			keylist: choices.map(function(choice) { return choice.value; }),
+			vallist: choices.map(function(choice) { return choice.label; }),
+			rows: rows,
+			tbody: tbody,
+			select: select,
+			optionNodes: optionNodes,
+			currentValue: currentValue
+		};
+	},
+
+	commitTemplateRefresh: function(staged) {
+		var i, option = this._defaultTemplateOption;
+
+		// Keep LuCI's option model aligned with the live native control. No UCI
+		// write or synthetic change event is needed for a display-only refresh.
+		if (option) {
+			option.keylist = staged.keylist;
+			option.vallist = staged.vallist;
+		}
+		this._enabledTemplateIds = staged.enabled;
+		this._enabledTemplateCount = Object.keys(staged.enabled).length;
+		this._templateSnapshot = staged.templates;
+
+		while (staged.tbody.firstChild)
+			staged.tbody.removeChild(staged.tbody.firstChild);
+		for (i = 0; i < staged.rows.length; i++)
+			staged.tbody.appendChild(staged.rows[i]);
+		while (staged.select.firstChild)
+			staged.select.removeChild(staged.select.firstChild);
+		for (i = 0; i < staged.optionNodes.length; i++)
+			staged.select.appendChild(staged.optionNodes[i]);
+		// Native browsers maintain HTMLSelectElement.options themselves. The
+		// lightweight render fixture exposes it as a plain array instead.
+		if (Array.isArray(staged.select.options))
+			staged.select.options = staged.optionNodes;
+		staged.select.value = staged.currentValue;
+		this._defaultTemplateSelect = staged.select;
+		// Recompute LuCI's cached validation state after updating the enabled set.
+		// This is display validation only; it does not write UCI or fire change.
+		if (option && typeof option.triggerValidation === 'function')
+			option.triggerValidation('main');
+	},
+
+	// Re-fetch the authoritative template list and synchronously commit a fully
+	// staged table/dropdown snapshot. Rejections intentionally propagate so the
+	// mutation caller can report that the backend write succeeded but UI refresh
+	// did not.
 	reloadTemplateList: function() {
 		var self = this;
 		return callListTemplates().then(function(res) {
-			var templates = (res && Array.isArray(res.templates)) ? res.templates : [];
-			if (!res || !Array.isArray(res.templates))
-				throw new Error(_('Invalid response from RPC backend.'));
-			self._enabledTemplateCount = templates.filter(function(template) {
-				return !!template.enabled;
-			}).length;
-			var tbody = document.getElementById('sbsc_tpl_tbody');
-			if (!tbody)
-				return;
-			while (tbody.firstChild)
-				tbody.removeChild(tbody.firstChild);
-			for (var i = 0; i < templates.length; i++)
-				tbody.appendChild(self.buildTemplateRow(templates[i]));
-		}).catch(function() { /* leave the existing table as-is on error */ });
+			var templates = templateSnapshot(res);
+			var staged = self.stageTemplateRefresh(templates);
+			self.commitTemplateRefresh(staged);
+			return templates;
+		});
 	},
 
 	renderTemplateManager: function(templates) {
@@ -825,7 +1340,17 @@ return view.extend({
 				self.setSaveStatus(_('Template saved, but: ') + String(res.warning), true);
 			else
 				self.setSaveStatus(_('Template saved.'), false);
-			return self.reloadTemplateList().then(done, done);
+			return self.reloadTemplateList().then(function() {
+				done();
+			}, function(err) {
+				var refreshError = (err && err.message) || String(err);
+				var message = res.warning ?
+					_('Template saved, but: ') + String(res.warning) + ' ' +
+						_('The template list refresh failed: ') + refreshError :
+					_('Template saved, but the template list refresh failed: ') + refreshError;
+				self.setSaveStatus(message, true);
+				done();
+			});
 		}).catch(function(err) {
 			self.setSaveStatus((err && err.message) || String(err), true);
 			done();
@@ -839,11 +1364,19 @@ return view.extend({
 		return callDeleteTemplate(id).then(function(res) {
 			if (!res || res.ok !== true || res.phase !== 'complete')
 				return toast((res && res.error) || _('Invalid response from RPC backend.'), true);
-			if (res.warning)
-				toast(_('Template deleted, but: ') + String(res.warning), true);
-			else
-				toast(_('Template deleted.'));
-			return self.reloadTemplateList();
+			return self.reloadTemplateList().then(function() {
+				if (res.warning)
+					toast(_('Template deleted, but: ') + String(res.warning), true);
+				else
+					toast(_('Template deleted.'));
+			}, function(err) {
+				var refreshError = (err && err.message) || String(err);
+				var message = res.warning ?
+					_('Template deleted, but: ') + String(res.warning) + ' ' +
+						_('The template list refresh failed: ') + refreshError :
+					_('Template deleted, but the template list refresh failed: ') + refreshError;
+				toast(message, true);
+			});
 		}).catch(function(err) { toast((err && err.message) || String(err), true); });
 	},
 

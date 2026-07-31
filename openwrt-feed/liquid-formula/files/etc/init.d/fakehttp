@@ -6,15 +6,17 @@ STOP=10
 
 PROG="/usr/bin/fakehttp"
 COMMON="/usr/share/liquid-formula-dpi/service-common.sh"
+WAN_RESOLVER="${LFDPI_WAN_RESOLVER:-/usr/share/liquid-formula-dpi/wan-resolver.sh}"
 SERVICE_NAME=fakehttp
 DEFAULT_BOOT_DELAY=60
 EXTRA_COMMANDS="link_down link_up boot_expired"
 EXTRA_HELP="
-	link_down DEVICE     Stop for a matching link-down event
-	link_up DEVICE       Resume for a matching link-up event
+	link_down DEVICE [NETWORK]  Stop for a matching link-down event
+	link_up DEVICE [NETWORK]    Resume for a matching link-up event
 	boot_expired TOKEN DEADLINE  Complete a supervised boot wait"
 
 . "$COMMON"
+[ ! -r "$WAN_RESOLVER" ] || . "$WAN_RESOLVER"
 
 fh_error() {
 	logger -t fakehttp -- "$*"
@@ -68,14 +70,17 @@ fh_validate_payload() {
 
 fh_validate_config() {
 	local interface_mode direction family repeat ttl hop_estimation dynamic_ttl_pct
-	local queue_num sibling_queue fwmark fwmask log_connections
+	local queue_num sibling_queue fwmark fwmask log_connections iface
 
 	FH_VALID=1
 	FH_INTERFACE_COUNT=0
 	FH_PAYLOAD_COUNT=0
 	FH_INTERFACES=''
-	config_get interface_mode main interface_mode 'selected'
-	case "$interface_mode" in selected|all) ;; *) fh_error "invalid interface mode"; FH_VALID=0 ;; esac
+	FH_AUTO_IPV4=0
+	FH_AUTO_IPV6=0
+	FH_WAN_UNAVAILABLE=0
+	config_get interface_mode main interface_mode 'auto'
+	case "$interface_mode" in auto|selected|all) ;; *) fh_error "invalid interface mode"; FH_VALID=0 ;; esac
 	[ "$interface_mode" = "selected" ] && config_list_foreach main interface fh_validate_interface
 	config_foreach fh_validate_payload payload
 
@@ -92,6 +97,20 @@ fh_validate_config() {
 	case "$direction" in inbound|outbound|both) ;; *) fh_error "invalid direction"; FH_VALID=0 ;; esac
 	config_get family main family 'dual'
 	case "$family" in ipv4|ipv6|dual) ;; *) fh_error "invalid address family"; FH_VALID=0 ;; esac
+	if [ "$interface_mode" = auto ] && [ "$FH_VALID" = 1 ]; then
+		if ! command -v tf_wan_resolve >/dev/null 2>&1 || ! tf_wan_resolve "$family"; then
+			fh_error "no requested address family has an official default WAN device"
+			FH_VALID=0
+			FH_WAN_UNAVAILABLE=1
+		else
+			FH_INTERFACES="$TF_WAN_DEVICES"
+			for iface in $FH_INTERFACES; do
+				FH_INTERFACE_COUNT=$((FH_INTERFACE_COUNT + 1))
+			done
+			[ -z "$TF_WAN_IPV4_DEVICE" ] || FH_AUTO_IPV4=1
+			[ -z "$TF_WAN_IPV6_DEVICE" ] || FH_AUTO_IPV6=1
+		fi
+	fi
 
 	config_get repeat main repeat '2'
 	tf_valid_uint_range "$repeat" 1 10 || { fh_error "repeat must be 1-10"; FH_VALID=0; }
@@ -176,15 +195,46 @@ fh_match_event_interface() {
 }
 
 fh_event_device_matches() {
-	local device="$1" enabled interface_mode
+	local device="$1" event="${2:-up}" network="${3:-}"
+	local enabled interface_mode family
 
 	config_load fakehttp
 	config_get_bool enabled main enabled 0
 	[ "$enabled" = 1 ] || return 1
-	config_get interface_mode main interface_mode selected
+	config_get interface_mode main interface_mode auto
 	case "$interface_mode" in
 		all) return 0 ;;
 		selected) ;;
+		auto)
+			case "$event" in
+				down)
+					tf_valid_network_name "$network" || return 1
+					tf_wan_state_get "$SERVICE_NAME" || return 1
+					{
+						[ "$network" = "$TF_WAN_STORED_IPV4_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_STORED_IPV4_DEVICE" ]
+					} || {
+						[ "$network" = "$TF_WAN_STORED_IPV6_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_STORED_IPV6_DEVICE" ]
+					}
+					return
+					;;
+				up)
+					tf_valid_network_name "$network" || return 1
+					config_get family main family dual
+					tf_wan_resolve "$family" || return 1
+					{
+						[ "$network" = "$TF_WAN_IPV4_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_IPV4_DEVICE" ]
+					} || {
+						[ "$network" = "$TF_WAN_IPV6_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_IPV6_DEVICE" ]
+					}
+					return
+					;;
+				*) return 1 ;;
+			esac
+			;;
 		*) return 1 ;;
 	esac
 	FH_EVENT_DEVICE="$device"
@@ -195,7 +245,7 @@ fh_event_device_matches() {
 
 fh_start_service_locked() {
 	local enabled interface_mode direction family repeat ttl hop_estimation dynamic_ttl_pct
-	local log_connections queue_num fwmark fwmask section
+	local log_connections queue_num fwmark fwmask section iface
 	local context boot_delay token deadline state
 
 	config_load fakehttp
@@ -261,7 +311,7 @@ fh_start_service_locked() {
 	[ -x "$PROG" ] || { fh_error "binary is missing or not executable: $PROG"; return 1; }
 	fh_validate_config || return 1
 
-	config_get interface_mode main interface_mode 'selected'
+	config_get interface_mode main interface_mode 'auto'
 	config_get direction main direction 'outbound'
 	config_get family main family 'dual'
 	config_get repeat main repeat '2'
@@ -273,11 +323,22 @@ fh_start_service_locked() {
 	config_get fwmark main fwmark '0x8000'
 	config_get fwmask main fwmask '0x8000'
 
+	if [ "$interface_mode" = auto ]; then
+		tf_wan_state_set "$SERVICE_NAME" || return 1
+	else
+		tf_wan_state_clear "$SERVICE_NAME" || return 1
+	fi
+	tf_link_state_set "$SERVICE_NAME" up || return 1
+
 	procd_open_instance fakehttp
 	procd_set_param command "$PROG"
 	FH_APPENDED_INTERFACES=''
 	if [ "$interface_mode" = "all" ]; then
 		procd_append_param command -a
+	elif [ "$interface_mode" = auto ]; then
+		for iface in $FH_INTERFACES; do
+			fh_append_interface "$iface"
+		done
 	else
 		config_list_foreach main interface fh_append_interface
 	fi
@@ -286,11 +347,16 @@ fh_start_service_locked() {
 		outbound) procd_append_param command -1 ;;
 		both) procd_append_param command -0 -1 ;;
 	esac
-	case "$family" in
-		ipv4) procd_append_param command -4 ;;
-		ipv6) procd_append_param command -6 ;;
-		dual) procd_append_param command -4 -6 ;;
-	esac
+	if [ "$interface_mode" = auto ]; then
+		[ "$FH_AUTO_IPV4" = 0 ] || procd_append_param command -4
+		[ "$FH_AUTO_IPV6" = 0 ] || procd_append_param command -6
+	else
+		case "$family" in
+			ipv4) procd_append_param command -4 ;;
+			ipv6) procd_append_param command -6 ;;
+			dual) procd_append_param command -4 -6 ;;
+		esac
+	fi
 	# FakeHTTP 0.9.18 inserts each parsed payload immediately after the ring's
 	# current node, so its effective rotation is the reverse of CLI order.
 	# Reverse UCI sections here to make the observed rotation match the LuCI row
@@ -321,12 +387,12 @@ start_service() {
 }
 
 link_down() {
-	local device="${1:-}" result=0
+	local device="${1:-}" network="${2:-}" result=0 step=0 interface_mode family
 
 	tf_valid_interface "$device" || { fh_error "invalid link-down device"; return 1; }
 	procd_lock
 	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
-	if ! fh_event_device_matches "$device"; then
+	if ! fh_event_device_matches "$device" down "$network"; then
 		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 		return 0
 	fi
@@ -334,14 +400,31 @@ link_down() {
 	if [ "$result" -eq 0 ]; then
 		procd_kill "$SERVICE_NAME" >/dev/null 2>&1 || true
 		tf_cleanup_firewall_state "$SERVICE_NAME"
-		LFDPI_SERVICE_CONTEXT=ifdown-definition start || result=$?
+		config_get interface_mode main interface_mode auto
+		if [ "$interface_mode" = auto ]; then
+			config_get family main family dual
+			if tf_wan_resolve "$family"; then
+				tf_link_state_set "$SERVICE_NAME" up || result=$?
+				if [ "$result" -eq 0 ]; then
+					LFDPI_SERVICE_CONTEXT=ifup start || result=$?
+				fi
+			else
+				tf_wan_state_clear "$SERVICE_NAME" || result=$?
+				LFDPI_SERVICE_CONTEXT=ifdown-definition start || {
+					step=$?
+					[ "$result" -ne 0 ] || result=$step
+				}
+			fi
+		else
+			LFDPI_SERVICE_CONTEXT=ifdown-definition start || result=$?
+		fi
 	fi
 	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 	return "$result"
 }
 
 link_up() {
-	local device="${1:-}" result=0
+	local device="${1:-}" network="${2:-}" result=0
 
 	tf_valid_interface "$device" || {
 		fh_error "invalid or unavailable link-up device: $device"
@@ -349,7 +432,8 @@ link_up() {
 	}
 	procd_lock
 	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
-	if ! tf_interface_exists "$device" || ! fh_event_device_matches "$device"; then
+	if ! tf_interface_exists "$device" ||
+	   ! fh_event_device_matches "$device" up "$network"; then
 		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 		return 0
 	fi

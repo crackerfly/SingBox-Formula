@@ -13,14 +13,25 @@ var callServiceList = rpc.declare({
 	expect: { '': {} }
 });
 
-function serviceRunning(name) {
+function serviceState(name) {
 	return L.resolveDefault(callServiceList(name), {}).then(function(res) {
 		var instances = res[name] && res[name].instances || {};
-		for (var key in instances)
-			if (instances[key] && instances[key].running)
-				return true;
-		return false;
+		var running = false, netdevs = [];
+		for (var key in instances) {
+			if (!instances[key] || !instances[key].running)
+				continue;
+			running = true;
+			normalizeList(instances[key].netdev).forEach(function(device) {
+				if (validInterface(device) && netdevs.indexOf(device) === -1)
+					netdevs.push(device);
+			});
+		}
+		return { running: running, netdevs: netdevs };
 	});
+}
+
+function serviceRunning(name) {
+	return serviceState(name).then(function(state) { return state.running; });
 }
 
 function validInterface(value) {
@@ -32,18 +43,6 @@ function listInterfaces() {
 		return (entries || []).map(function(entry) { return entry && entry.name; })
 			.filter(function(name) { return name && name !== 'lo' && validInterface(name); })
 			.sort();
-	});
-}
-
-function detectWanDevice() {
-	return L.resolveDefault(fs.read('/proc/net/route'), '').then(function(text) {
-		var lines = String(text || '').split(/\n/);
-		for (var i = 1; i < lines.length; i++) {
-			var fields = lines[i].trim().split(/\s+/);
-			if (fields.length > 1 && fields[1] === '00000000' && validInterface(fields[0]))
-				return fields[0];
-		}
-		return '';
 	});
 }
 
@@ -147,15 +146,15 @@ return view.extend({
 			uci.load('fakesip'),
 			uci.load('fakehttp'),
 			listInterfaces(),
-			detectWanDevice(),
-			serviceRunning('fakesip')
+			serviceState('fakesip')
 		]);
 	},
 
 	render: function(data) {
 		var interfaces = data[2] || [];
-		var wanDevice = data[3] || '';
-		var running = data[4] || false;
+		var state = data[3] || { running: false, netdevs: [] };
+		var running = state.running || false;
+		var resolvedWan = state.netdevs || [];
 		var m = new form.Map('fakesip', _('FakeSIP'),
 			_('Router-wide UDP DPI obfuscation using the TaoistFuchen-maintained FakeSIP 0.9.5. It adds a SIP-looking decoy to early UDP packets; it is not a VPN, proxy, or encryption layer.'));
 		var s = m.section(form.NamedSection, 'main', 'fakesip', _('Service settings'));
@@ -184,14 +183,28 @@ return view.extend({
 				_('Enter an integer from 0 to 600 without leading zeros. Use 0 for no delay.');
 		};
 
+		o = s.taboption('basic', form.ListValue, 'interface_mode', _('Interface scope'));
+		o.value('auto', _('OpenWrt default WAN (recommended)'));
+		o.value('selected', _('Selected Internet-facing devices'));
+		o.default = 'auto';
+		o.rmempty = false;
+
+		o = s.taboption('basic', form.DummyValue, '_resolved_wan',
+			_('Current resolved WAN devices'));
+		o.cfgvalue = function() {
+			return resolvedWan.length ? resolvedWan.join(', ') : _('Unavailable');
+		};
+
 		o = s.taboption('basic', form.MultiValue, 'interface', _('Internet-facing devices'),
-			_('Select actual Linux devices, not LuCI network names. For PPPoE this is commonly pppoe-wan. FakeSIP never enables an unrestricted all-device mode.'));
+			_('Used only in manual mode. Select actual Linux devices, not LuCI network names. For PPPoE this is commonly pppoe-wan. FakeSIP never enables an unrestricted all-device mode.'));
 		interfaces.forEach(function(name) { o.value(name); });
-		if (wanDevice && interfaces.indexOf(wanDevice) !== -1) o.default = [ wanDevice ];
+		o.depends('interface_mode', 'selected');
+		o.retain = true;
 		o.rmempty = true;
 		o.validate = function(sectionId, value) {
 			var values = normalizeList(value);
-			if (optionValue(this.map, 'enabled', sectionId, '0') !== '1')
+			if (optionValue(this.map, 'enabled', sectionId, '0') !== '1' ||
+			    optionValue(this.map, 'interface_mode', sectionId, 'auto') !== 'selected')
 				return true;
 			if (values.length === 0)
 				return _('Select at least one Internet-facing device.');

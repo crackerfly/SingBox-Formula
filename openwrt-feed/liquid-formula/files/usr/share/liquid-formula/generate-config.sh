@@ -6,12 +6,18 @@ umask 077
 FUNCTIONS_SH=${SBF_FUNCTIONS_SH:-/lib/functions.sh}
 CONFIG=${SBF_CONFIG_NAME:-liquid_formula}
 OUT=${SBF_CONFIG_OUT:-/etc/liquid-formula/config.yaml}
+INCLUDE_DISABLED_URLS=${SBF_INCLUDE_DISABLED_URLS:-0}
 TMP=
 
 die() {
 	printf 'generate-config: %s\n' "$*" >&2
 	exit 1
 }
+
+case "$INCLUDE_DISABLED_URLS" in
+	0|1) ;;
+	*) die "SBF_INCLUDE_DISABLED_URLS must be 0 or 1" ;;
+esac
 
 # --------------------------------------------------------------- 串行化 ----
 # config.yaml 有 7 个生成入口: Overview 保存、generate RPC、模板写入/删除、
@@ -95,12 +101,183 @@ uint_between() {
 	[ "$value" -le "$maximum" ] 2>/dev/null
 }
 
+INT32_MAX=2147483647
+CHECKED_RESULT=
+
+checked_add_int32() {
+	local left="$1" right="$2" remaining
+	uint_between "$left" 0 "$INT32_MAX" || return 1
+	uint_between "$right" 0 "$INT32_MAX" || return 1
+	remaining=$((INT32_MAX - right))
+	[ "$left" -le "$remaining" ] || return 1
+	CHECKED_RESULT=$((left + right))
+}
+
+checked_multiply_int32() {
+	local left="$1" right="$2" quotient
+	uint_between "$left" 0 "$INT32_MAX" || return 1
+	uint_between "$right" 0 "$INT32_MAX" || return 1
+	if [ "$left" -ne 0 ]; then
+		quotient=$((INT32_MAX / left))
+		[ "$right" -le "$quotient" ] || return 1
+	fi
+	CHECKED_RESULT=$((left * right))
+}
+
+valid_ipv6_literal() {
+	printf '%s\n' "$1" | LC_ALL=C awk '
+	function valid_decimal(part) {
+		return part ~ /^[0-9]+$/ &&
+			(length(part) == 1 || substr(part, 1, 1) != "0") &&
+			part + 0 <= 255
+	}
+	function valid_ipv4(value, octets, count, idx) {
+		count = split(value, octets, ".")
+		if (count != 4)
+			return 0
+		for (idx = 1; idx <= count; idx++)
+			if (!valid_decimal(octets[idx]))
+				return 0
+		return 1
+	}
+	function valid_ipv6(value, zone_at, zone, compression, left, right,
+			groups, temporary, count, idx, part, units) {
+		zone_at = index(value, "%25")
+		if (zone_at > 0) {
+			zone = substr(value, zone_at + 3)
+			if (zone == "" || index(zone, "%") > 0)
+				return 0
+			value = substr(value, 1, zone_at - 1)
+		}
+		if (index(value, "%") > 0 || index(value, ":") == 0 ||
+				index(value, ":::") > 0)
+			return 0
+		compression = index(value, "::")
+		if (compression > 0) {
+			left = substr(value, 1, compression - 1)
+			right = substr(value, compression + 2)
+			if (index(right, "::") > 0)
+				return 0
+		} else {
+			left = value
+			right = ""
+		}
+		count = 0
+		if (left != "") {
+			part = split(left, temporary, ":")
+			for (idx = 1; idx <= part; idx++)
+				groups[++count] = temporary[idx]
+		}
+		if (right != "") {
+			part = split(right, temporary, ":")
+			for (idx = 1; idx <= part; idx++)
+				groups[++count] = temporary[idx]
+		}
+		units = 0
+		for (idx = 1; idx <= count; idx++) {
+			part = groups[idx]
+			if (index(part, ".") > 0) {
+				if (idx != count || !valid_ipv4(part))
+					return 0
+				units += 2
+			} else {
+				if (length(part) < 1 || length(part) > 4 ||
+						part !~ /^[0-9A-Fa-f]+$/)
+					return 0
+				units++
+			}
+		}
+		return compression > 0 ? units < 8 : units == 8
+	}
+	{ exit(valid_ipv6($0) ? 0 : 1) }
+	'
+}
+
 valid_http_url() {
-	valid_scalar "$1" || return 1
-	case "$1" in
-		http://?*|https://?*) return 0 ;;
+	local url="$1" rest authority userinfo hostport hostname suffix port escaped
+	local before_query fragment percent_part host_escaped
+	[ -n "$url" ] || return 1
+	# Match net/url's raw-byte boundary: no ASCII space, C0 control, or DEL.
+	! printf '%s' "$url" | LC_ALL=C grep -q '[[:cntrl:] ]' || return 1
+	case "$url" in
+		[Hh][Tt][Tt][Pp]://?*|[Hh][Tt][Tt][Pp][Ss]://?*) ;;
 		*) return 1 ;;
 	esac
+	# net/url decodes authority/path/fragment and rejects malformed escapes
+	# there; RawQuery remains opaque until a caller explicitly decodes it.
+	before_query=${url%%\?*}
+	fragment=
+	case "$url" in *#*) fragment=${url#*#} ;; esac
+	for percent_part in "$before_query" "$fragment"; do
+		escaped=$percent_part
+		while [ "${escaped#*%}" != "$escaped" ]; do
+			escaped=${escaped#*%}
+			case "$escaped" in
+				[0-9A-Fa-f][0-9A-Fa-f]*) escaped=${escaped#??} ;;
+				*) return 1 ;;
+			esac
+		done
+	done
+	rest=${url#*://}
+	authority=${rest%%[/?#]*}
+	[ -n "$authority" ] || return 1
+	userinfo=
+	case "$authority" in
+		*@*)
+			userinfo=${authority%@*}
+			case "$userinfo" in
+				*'"'*|*'<'*|*'>'*|*'\'*|*'^'*|*'`'*|*'{'*|*'|'*|*'}'*|*'['*|*']'*|*@*) return 1 ;;
+			esac
+			;;
+	esac
+	hostport=${authority##*@}
+	[ -n "$hostport" ] || return 1
+	case "$hostport" in
+		\[* )
+			case "$hostport" in *\]*) ;; *) return 1 ;; esac
+			hostname=${hostport#\[}
+			hostname=${hostname%%\]*}
+			[ -n "$hostname" ] || return 1
+			valid_ipv6_literal "$hostname" || return 1
+			suffix=${hostport#*\]}
+			case "$suffix" in
+				'') ;;
+				:*)
+					port=${suffix#:}
+					case "$port" in *[!0-9]*) return 1 ;; esac
+					;;
+				*) return 1 ;;
+			esac
+			;;
+		*\]*) return 1 ;;
+		*)
+			case "$hostport" in
+				*:*)
+					hostname=${hostport%%:*}
+					port=${hostport#*:}
+					case "$port" in *[!0-9]*) return 1 ;; esac
+					;;
+				*) hostname=$hostport ;;
+			esac
+			[ -n "$hostname" ] || return 1
+			case "$hostname" in *[\[\]]*) return 1 ;; esac
+			;;
+	esac
+	case "$hostname" in
+		*'"'*|*'<'*|*'>'*|*'\'*|*'^'*|*'`'*|*'{'*|*'|'*|*'}'*|*'['*|*']'*) return 1 ;;
+	esac
+	# net/url forbids percent-encoding ASCII bytes in a host, except %25
+	# which introduces an RFC 6874 IPv6 zone identifier.
+	host_escaped=$hostname
+	while [ "${host_escaped#*%}" != "$host_escaped" ]; do
+		host_escaped=${host_escaped#*%}
+		case "$host_escaped" in
+			25*) ;;
+			[0-7][0-9A-Fa-f]*) return 1 ;;
+		esac
+		host_escaped=${host_escaped#??}
+	done
+	return 0
 }
 
 valid_template_base_url() {
@@ -169,16 +346,56 @@ DEFAULT_FOUND=0
 DEFAULT_ENABLED=0
 TEMPLATE_COUNT=0
 ENABLED_TEMPLATE_COUNT=0
+SUBSCRIPTION_ERROR=
+SUBSCRIPTION_URL_COUNT=0
+GATEWAY_URLS_YAML=
+
+collect_subscription_url() {
+	local url="$1" url_yaml
+	checked_add_int32 "$SUBSCRIPTION_URL_COUNT" 1 || {
+		SUBSCRIPTION_ERROR='too many subscription URLs'
+		return 1
+	}
+	[ "$CHECKED_RESULT" -le 8 ] || {
+		SUBSCRIPTION_ERROR='at most 8 subscription URLs are allowed'
+		return 1
+	}
+	[ -n "$url" ] && valid_http_url "$url" || {
+		SUBSCRIPTION_ERROR='subscription_url list items must use HTTP or HTTPS'
+		return 1
+	}
+	url_yaml=$(yaml_quote "$url") || {
+		SUBSCRIPTION_ERROR='failed to quote a subscription URL'
+		return 1
+	}
+	SUBSCRIPTION_URL_COUNT=$CHECKED_RESULT
+	if [ -z "$GATEWAY_URLS_YAML" ]; then
+		GATEWAY_URLS_YAML="    - $url_yaml"
+	else
+		GATEWAY_URLS_YAML="$GATEWAY_URLS_YAML
+    - $url_yaml"
+	fi
+}
 
 validate_template() {
 	local sid="$1" enabled name file no_node
-	TEMPLATE_COUNT=$((TEMPLATE_COUNT + 1))
+	checked_add_int32 "$TEMPLATE_COUNT" 1 || {
+		VALIDATION_ERROR='too many templates'
+		return 0
+	}
+	TEMPLATE_COUNT=$CHECKED_RESULT
 	valid_template_id "$sid" || {
 		VALIDATION_ERROR="invalid template id: $sid"
 		return 0
 	}
 	config_get_bool enabled "$sid" enabled 1
-	[ "$enabled" != 1 ] || ENABLED_TEMPLATE_COUNT=$((ENABLED_TEMPLATE_COUNT + 1))
+	if [ "$enabled" = 1 ]; then
+		checked_add_int32 "$ENABLED_TEMPLATE_COUNT" 1 || {
+			VALIDATION_ERROR='too many enabled templates'
+			return 0
+		}
+		ENABLED_TEMPLATE_COUNT=$CHECKED_RESULT
+	fi
 	config_get name "$sid" name "$sid"
 	config_get file "$sid" file "$sid.json"
 	config_get no_node "$sid" no_node '➜ Direct'
@@ -242,8 +459,23 @@ auth:
 subscription:
   url: $sub_url_yaml
   user_agent: $user_agent_yaml
-  timeout: $sub_timeout
+  timeout: $aggregate_timeout
   refresh_interval: $refresh_interval
+
+liquid_formula_gateway:
+  listen_address: '127.0.0.1'
+  listen_port: $gateway_port
+  source_timeout: $sub_timeout
+  aggregate_timeout: $aggregate_timeout
+  user_agent: $user_agent_yaml
+EOF
+	if { [ "$enabled" != 1 ] && [ "$INCLUDE_DISABLED_URLS" != 1 ]; } ||
+		[ "$SUBSCRIPTION_URL_COUNT" -eq 0 ]; then
+		printf '%s\n' '  urls: []' || return 1
+	else
+		printf '%s\n%s\n' '  urls:' "$GATEWAY_URLS_YAML" || return 1
+	fi
+	cat <<EOF || return 1
 
 templates:
 EOF
@@ -282,7 +514,6 @@ config_get_bool enabled main enabled 0
 config_get boot_delay main boot_delay '90'
 config_get port main port '9716'
 config_get password main password '890716'
-config_get sub_url main subscription_url ''
 config_get user_agent main user_agent ''
 config_get sub_timeout main subscription_timeout '60'
 config_get refresh_interval main refresh_interval '360'
@@ -321,11 +552,14 @@ esac
 valid_template_base_url "$template_base_url" || die "template_base_url must use local HTTP loopback"
 valid_output_path "$output_config" || die "output_config is outside the permitted JSON directories"
 
-if [ -n "$sub_url" ]; then
-	valid_http_url "$sub_url" || die "subscription_url must use HTTP or HTTPS"
-elif [ "$enabled" = 1 ]; then
-	die "subscription_url is required while the service is enabled"
+if ! config_list_foreach main subscription_url collect_subscription_url; then
+	[ -z "$SUBSCRIPTION_ERROR" ] || die "$SUBSCRIPTION_ERROR"
+	die "failed to inspect subscription_url list"
 fi
+[ -z "$SUBSCRIPTION_ERROR" ] || die "$SUBSCRIPTION_ERROR"
+[ "$enabled" != 1 ] && [ "$INCLUDE_DISABLED_URLS" != 1 ] ||
+	[ "$SUBSCRIPTION_URL_COUNT" -gt 0 ] || \
+	die "at least one subscription_url list item is required while the service is enabled"
 
 config_foreach validate_template template || die "failed to inspect templates"
 [ -z "$VALIDATION_ERROR" ] || die "$VALIDATION_ERROR"
@@ -333,13 +567,40 @@ config_foreach validate_template template || die "failed to inspect templates"
 [ "$DEFAULT_FOUND" = 1 ] || die "default_template does not exist"
 [ "$DEFAULT_ENABLED" = 1 ] || die "default_template is disabled"
 
-# 一次刷新是串行的: 先拉节点, 再逐个拉启用的模板, 每段各自受
-# subscription_timeout 约束。只按"一次请求 + 60"给预算的话, 启用两个模板就
-# 可能在响应写出之前把写超时耗光。
-write_timeout=$((sub_timeout * (ENABLED_TEMPLATE_COUNT + 1) + 30))
-[ "$write_timeout" -le 3600 ] || write_timeout=3600
+# 网关串行拉取 S 个订阅源，每个源最多 T 秒，再留 60 秒完成转换器响应。
+# 即使当前禁用且 S=0，转换器端仍保留一份 T 的基础预算。
+source_budget_count=0
+if [ "$enabled" = 1 ] || [ "$INCLUDE_DISABLED_URLS" = 1 ]; then
+	source_budget_count=$SUBSCRIPTION_URL_COUNT
+fi
+[ "$source_budget_count" -gt 0 ] || source_budget_count=1
+checked_multiply_int32 "$source_budget_count" "$sub_timeout" || \
+	die "aggregate timeout exceeds signed 32-bit range"
+checked_add_int32 "$CHECKED_RESULT" 60 || \
+	die "aggregate timeout exceeds signed 32-bit range"
+aggregate_timeout=$CHECKED_RESULT
+
+# 整个 HTTP 请求还要串行处理 E 个启用模板，每个模板最多 T 秒，最后再留
+# 60 秒写出完整响应。每一步都在执行 shell 算术之前验证 signed-int32 边界。
+checked_multiply_int32 "$ENABLED_TEMPLATE_COUNT" "$sub_timeout" || \
+	die "server write timeout exceeds signed 32-bit range"
+template_budget=$CHECKED_RESULT
+checked_add_int32 "$aggregate_timeout" "$template_budget" || \
+	die "server write timeout exceeds signed 32-bit range"
+checked_add_int32 "$CHECKED_RESULT" 60 || \
+	die "server write timeout exceeds signed 32-bit range"
+write_timeout=$CHECKED_RESULT
+
+if [ "$port" -eq 65535 ]; then
+	gateway_port=65534
+else
+	checked_add_int32 "$port" 1 || die "cannot derive gateway port"
+	gateway_port=$CHECKED_RESULT
+fi
+aggregate_url="http://127.0.0.1:$gateway_port/v1/aggregate"
+
 password_yaml=$(yaml_quote "$password") || die "failed to quote password"
-sub_url_yaml=$(yaml_quote "$sub_url") || die "failed to quote subscription URL"
+sub_url_yaml=$(yaml_quote "$aggregate_url") || die "failed to quote aggregate URL"
 user_agent_yaml=$(yaml_quote "$user_agent") || die "failed to quote subscription user agent"
 default_template_yaml=$(yaml_quote "$default_template") || die "failed to quote default template"
 cache_dir_yaml=$(yaml_quote "$cache_dir") || die "failed to quote cache directory"
@@ -363,12 +624,20 @@ if [ -f "$OUT" ]; then
 			chmod 0600 "$OUT" || die "failed to secure existing config"
 			;;
 		1)
+			if [ -n "${SBF_TEST_FAULT_HOOK:-}" ]; then
+				"$SBF_TEST_FAULT_HOOK" before_config_rename || \
+					die "fault injected before config rename"
+			fi
 			mv "$TMP" "$OUT" || die "failed to atomically replace config"
 			TMP=
 			;;
 		*) die "failed to compare config staging file with existing config" ;;
 	esac
 else
+	if [ -n "${SBF_TEST_FAULT_HOOK:-}" ]; then
+		"$SBF_TEST_FAULT_HOOK" before_config_rename || \
+			die "fault injected before config rename"
+	fi
 	mv "$TMP" "$OUT" || die "failed to atomically replace config"
 	TMP=
 fi

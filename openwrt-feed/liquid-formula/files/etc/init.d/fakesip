@@ -6,15 +6,17 @@ STOP=10
 
 PROG="/usr/bin/fakesip"
 COMMON="/usr/share/liquid-formula-dpi/service-common.sh"
+WAN_RESOLVER="${LFDPI_WAN_RESOLVER:-/usr/share/liquid-formula-dpi/wan-resolver.sh}"
 SERVICE_NAME=fakesip
 DEFAULT_BOOT_DELAY=40
 EXTRA_COMMANDS="link_down link_up boot_expired"
 EXTRA_HELP="
-	link_down DEVICE     Stop for a matching link-down event
-	link_up DEVICE       Resume for a matching link-up event
+	link_down DEVICE [NETWORK]  Stop for a matching link-down event
+	link_up DEVICE [NETWORK]    Resume for a matching link-up event
 	boot_expired TOKEN DEADLINE  Complete a supervised boot wait"
 
 . "$COMMON"
+[ ! -r "$WAN_RESOLVER" ] || . "$WAN_RESOLVER"
 
 fs_error() {
 	logger -t fakesip -- "$*"
@@ -36,18 +38,21 @@ fs_validate_interface() {
 
 fs_validate_config() {
 	local interface_mode direction family port_mode ports payload_mode sip_uri repeat ttl
-	local hop_estimation dynamic_ttl_pct log_connections queue_num sibling_queue fwmark fwmask
+	local hop_estimation dynamic_ttl_pct log_connections queue_num sibling_queue fwmark fwmask iface
 
 	FS_VALID=1
 	FS_INTERFACE_COUNT=0
 	FS_INTERFACES=''
-	config_get interface_mode main interface_mode 'selected'
-	if [ "$interface_mode" != "selected" ]; then
-		fs_error "FakeSIP only permits explicitly selected interfaces"
-		FS_VALID=0
-	fi
-	config_list_foreach main interface fs_validate_interface
-	if [ "$FS_INTERFACE_COUNT" -eq 0 ]; then
+	FS_AUTO_IPV4=0
+	FS_AUTO_IPV6=0
+	FS_WAN_UNAVAILABLE=0
+	config_get interface_mode main interface_mode 'auto'
+	case "$interface_mode" in
+		auto) ;;
+		selected) config_list_foreach main interface fs_validate_interface ;;
+		*) fs_error "invalid interface mode"; FS_VALID=0 ;;
+	esac
+	if [ "$interface_mode" = selected ] && [ "$FS_INTERFACE_COUNT" -eq 0 ]; then
 		fs_error "select at least one existing Internet-facing interface"
 		FS_VALID=0
 	fi
@@ -59,6 +64,20 @@ fs_validate_config() {
 		ipv4|ipv6|dual) ;;
 		*) fs_error "invalid address family"; FS_VALID=0 ;;
 	esac
+	if [ "$interface_mode" = auto ] && [ "$FS_VALID" = 1 ]; then
+		if ! command -v tf_wan_resolve >/dev/null 2>&1 || ! tf_wan_resolve "$family"; then
+			fs_error "no requested address family has an official default WAN device"
+			FS_VALID=0
+			FS_WAN_UNAVAILABLE=1
+		else
+			FS_INTERFACES="$TF_WAN_DEVICES"
+			for iface in $FS_INTERFACES; do
+				FS_INTERFACE_COUNT=$((FS_INTERFACE_COUNT + 1))
+			done
+			[ -z "$TF_WAN_IPV4_DEVICE" ] || FS_AUTO_IPV4=1
+			[ -z "$TF_WAN_IPV6_DEVICE" ] || FS_AUTO_IPV6=1
+		fi
+	fi
 
 	config_get port_mode main port_mode 'exclude'
 	config_get ports main ports '53'
@@ -134,13 +153,47 @@ fs_match_event_interface() {
 }
 
 fs_event_device_matches() {
-	local device="$1" enabled interface_mode
+	local device="$1" event="${2:-up}" network="${3:-}"
+	local enabled interface_mode family
 
 	config_load fakesip
 	config_get_bool enabled main enabled 0
 	[ "$enabled" = 1 ] || return 1
-	config_get interface_mode main interface_mode selected
-	[ "$interface_mode" = selected ] || return 1
+	config_get interface_mode main interface_mode auto
+	case "$interface_mode" in
+		selected) ;;
+		auto)
+			case "$event" in
+				down)
+					tf_valid_network_name "$network" || return 1
+					tf_wan_state_get "$SERVICE_NAME" || return 1
+					{
+						[ "$network" = "$TF_WAN_STORED_IPV4_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_STORED_IPV4_DEVICE" ]
+					} || {
+						[ "$network" = "$TF_WAN_STORED_IPV6_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_STORED_IPV6_DEVICE" ]
+					}
+					return
+					;;
+				up)
+					tf_valid_network_name "$network" || return 1
+					config_get family main family dual
+					tf_wan_resolve "$family" || return 1
+					{
+						[ "$network" = "$TF_WAN_IPV4_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_IPV4_DEVICE" ]
+					} || {
+						[ "$network" = "$TF_WAN_IPV6_NETWORK" ] &&
+							[ "$device" = "$TF_WAN_IPV6_DEVICE" ]
+					}
+					return
+					;;
+				*) return 1 ;;
+			esac
+			;;
+		*) return 1 ;;
+	esac
 	FS_EVENT_DEVICE="$device"
 	FS_EVENT_MATCH=0
 	config_list_foreach main interface fs_match_event_interface
@@ -148,9 +201,9 @@ fs_event_device_matches() {
 }
 
 fs_start_service_locked() {
-	local enabled direction family port_mode ports payload_mode sip_uri repeat ttl
+	local enabled interface_mode direction family port_mode ports payload_mode sip_uri repeat ttl
 	local hop_estimation dynamic_ttl_pct log_connections queue_num fwmark fwmask
-	local context boot_delay token deadline state
+	local context boot_delay token deadline state iface
 
 	config_load fakesip
 	config_get_bool enabled main enabled 0
@@ -217,6 +270,7 @@ fs_start_service_locked() {
 	[ -x "$PROG" ] || { fs_error "binary is missing or not executable: $PROG"; return 1; }
 	fs_validate_config || return 1
 
+	config_get interface_mode main interface_mode 'auto'
 	config_get direction main direction 'outbound'
 	config_get family main family 'dual'
 	config_get port_mode main port_mode 'exclude'
@@ -232,10 +286,23 @@ fs_start_service_locked() {
 	config_get fwmark main fwmark '0x10000'
 	config_get fwmask main fwmask '0x10000'
 
+	if [ "$interface_mode" = auto ]; then
+		tf_wan_state_set "$SERVICE_NAME" || return 1
+	else
+		tf_wan_state_clear "$SERVICE_NAME" || return 1
+	fi
+	tf_link_state_set "$SERVICE_NAME" up || return 1
+
 	procd_open_instance fakesip
 	procd_set_param command "$PROG"
 	FS_APPENDED_INTERFACES=''
-	config_list_foreach main interface fs_append_interface
+	if [ "$interface_mode" = auto ]; then
+		for iface in $FS_INTERFACES; do
+			fs_append_interface "$iface"
+		done
+	else
+		config_list_foreach main interface fs_append_interface
+	fi
 	# The Droid-MAX baseline retained by FakeSIP 0.9.5 checks PACKET_HOST against
 	# `outbound` and
 	# PACKET_OUTGOING against `inbound`. Compensate for that upstream inversion
@@ -245,11 +312,16 @@ fs_start_service_locked() {
 		outbound) procd_append_param command -0 ;;
 		both) procd_append_param command -0 -1 ;;
 	esac
-	case "$family" in
-		ipv4) procd_append_param command -4 ;;
-		ipv6) procd_append_param command -6 ;;
-		dual) procd_append_param command -4 -6 ;;
-	esac
+	if [ "$interface_mode" = auto ]; then
+		[ "$FS_AUTO_IPV4" = 0 ] || procd_append_param command -4
+		[ "$FS_AUTO_IPV6" = 0 ] || procd_append_param command -6
+	else
+		case "$family" in
+			ipv4) procd_append_param command -4 ;;
+			ipv6) procd_append_param command -6 ;;
+			dual) procd_append_param command -4 -6 ;;
+		esac
+	fi
 	case "$port_mode" in
 		include) procd_append_param command -p "$ports" ;;
 		exclude) procd_append_param command -P "$ports" ;;
@@ -276,12 +348,12 @@ start_service() {
 }
 
 link_down() {
-	local device="${1:-}" result=0
+	local device="${1:-}" network="${2:-}" result=0 step=0 interface_mode family
 
 	tf_valid_interface "$device" || { fs_error "invalid link-down device"; return 1; }
 	procd_lock
 	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
-	if ! fs_event_device_matches "$device"; then
+	if ! fs_event_device_matches "$device" down "$network"; then
 		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 		return 0
 	fi
@@ -289,14 +361,31 @@ link_down() {
 	if [ "$result" -eq 0 ]; then
 		procd_kill "$SERVICE_NAME" >/dev/null 2>&1 || true
 		tf_cleanup_firewall_state "$SERVICE_NAME"
-		LFDPI_SERVICE_CONTEXT=ifdown-definition start || result=$?
+		config_get interface_mode main interface_mode auto
+		if [ "$interface_mode" = auto ]; then
+			config_get family main family dual
+			if tf_wan_resolve "$family"; then
+				tf_link_state_set "$SERVICE_NAME" up || result=$?
+				if [ "$result" -eq 0 ]; then
+					LFDPI_SERVICE_CONTEXT=ifup start || result=$?
+				fi
+			else
+				tf_wan_state_clear "$SERVICE_NAME" || result=$?
+				LFDPI_SERVICE_CONTEXT=ifdown-definition start || {
+					step=$?
+					[ "$result" -ne 0 ] || result=$step
+				}
+			fi
+		else
+			LFDPI_SERVICE_CONTEXT=ifdown-definition start || result=$?
+		fi
 	fi
 	tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 	return "$result"
 }
 
 link_up() {
-	local device="${1:-}" result=0
+	local device="${1:-}" network="${2:-}" result=0
 
 	tf_valid_interface "$device" || {
 		fs_error "invalid or unavailable link-up device: $device"
@@ -304,7 +393,8 @@ link_up() {
 	}
 	procd_lock
 	tf_lifecycle_lock_acquire "$SERVICE_NAME" || return 1
-	if ! tf_interface_exists "$device" || ! fs_event_device_matches "$device"; then
+	if ! tf_interface_exists "$device" ||
+	   ! fs_event_device_matches "$device" up "$network"; then
 		tf_lifecycle_lock_release "$SERVICE_NAME" || return 1
 		return 0
 	fi

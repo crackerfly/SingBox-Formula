@@ -9,14 +9,16 @@ GEN=${SBF_GENERATOR:-/usr/share/liquid-formula/generate-config.sh}
 UPDATE=${SBF_UPDATER:-/usr/share/liquid-formula/update.sh}
 VALIDATE=${SBF_TEMPLATE_VALIDATOR:-/usr/share/liquid-formula/validate-template.sh}
 INIT=${SBF_INIT_SCRIPT:-/etc/init.d/liquid-formula}
+SUBSCRIPTION_GATEWAY=${SBF_SUBSCRIPTION_GATEWAY:-/usr/bin/liquid-formula-subscription-gateway}
+GENERATED_CONFIG=${SBF_GENERATED_CONFIG:-/etc/liquid-formula/config.yaml}
 STATE_DIR=${SBF_STATE_DIR:-/var/run/liquid-formula}
 ACTION_LOCK="$STATE_DIR/rpc-action.lock"
 ACTION_STATE="$STATE_DIR/action.state"
 ACTION_ERR="$STATE_DIR/action.err"
-# Maximum valid dynamic budget: three 3,660-second phases plus startup/cleanup
-# overhead. Invalid UCI will make the updater fail fast, but the fallback must
-# never reintroduce a shorter watchdog than a valid operation may require.
-ACTION_TIMEOUT_FALLBACK=11160
+ACTION_MAX_INT=2147483647
+ACTION_CHECKED_RESULT=0
+ACTION_SOURCE_COUNT=0
+ACTION_TEMPLATE_COUNT=0
 
 # busybox 的 timeout applet 是可裁剪的, 并非所有固件都编入。缺失时降级为
 # 直接执行: 丢掉看门狗, 也好过整个动作以 127 退出而根本不运行。
@@ -35,39 +37,89 @@ _run_with_timeout() {
 _count_action_template() {
 	local sid="$1" enabled
 	config_get_bool enabled "$sid" enabled 1
-	[ "$enabled" != 1 ] || ACTION_TEMPLATE_COUNT=$((ACTION_TEMPLATE_COUNT + 1))
+	[ "$enabled" != 1 ] || {
+		_action_checked_add "$ACTION_TEMPLATE_COUNT" 1 || return 1
+		ACTION_TEMPLATE_COUNT=$ACTION_CHECKED_RESULT
+	}
 	return 0
 }
 
-_action_timeout() {
-	# The updater's HTTP budget grows with subscription_timeout and every enabled
-	# template. Check/apply may spend that budget once while a temporary converter
-	# starts, once refreshing, and once fetching the selected template.
-	local sub="$1" sub_timeout request_timeout seconds
-	if ! config_load "$CONFIG" >/dev/null 2>&1; then
-		printf '%s' "$ACTION_TIMEOUT_FALLBACK"
-		return
-	fi
-	config_get sub_timeout main subscription_timeout 60
-	case "$sub_timeout" in
-		''|*[!0-9]*) printf '%s' "$ACTION_TIMEOUT_FALLBACK"; return ;;
+_action_uint_between() {
+	local value="$1" minimum="$2" maximum="$3"
+	case "$value" in
+		''|*[!0-9]*) return 1 ;;
+		0) ;;
+		0*) return 1 ;;
 	esac
-	[ "$sub_timeout" -ge 5 ] 2>/dev/null && [ "$sub_timeout" -le 600 ] 2>/dev/null || {
-		printf '%s' "$ACTION_TIMEOUT_FALLBACK"
-		return
-	}
+	[ "${#value}" -le "${#maximum}" ] || return 1
+	[ "$value" -ge "$minimum" ] 2>/dev/null || return 1
+	[ "$value" -le "$maximum" ] 2>/dev/null
+}
+
+_action_checked_add() {
+	local left="$1" right="$2"
+	_action_uint_between "$left" 0 "$ACTION_MAX_INT" || return 1
+	_action_uint_between "$right" 0 "$ACTION_MAX_INT" || return 1
+	[ "$left" -le $((ACTION_MAX_INT - right)) ] || return 1
+	ACTION_CHECKED_RESULT=$((left + right))
+}
+
+_action_checked_multiply() {
+	local left="$1" right="$2"
+	_action_uint_between "$left" 0 "$ACTION_MAX_INT" || return 1
+	_action_uint_between "$right" 0 "$ACTION_MAX_INT" || return 1
+	if [ "$left" -eq 0 ] || [ "$right" -eq 0 ]; then
+		ACTION_CHECKED_RESULT=0
+		return 0
+	fi
+	[ "$left" -le $((ACTION_MAX_INT / right)) ] || return 1
+	ACTION_CHECKED_RESULT=$((left * right))
+}
+
+_count_action_source() {
+	_action_checked_add "$ACTION_SOURCE_COUNT" 1 || return 1
+	ACTION_SOURCE_COUNT=$ACTION_CHECKED_RESULT
+	[ "$ACTION_SOURCE_COUNT" -le 8 ]
+}
+
+_action_timeout() {
+	local sub="$1" sub_timeout source_budget aggregate_timeout template_budget
+	local request_timeout seconds
+	config_load "$CONFIG" >/dev/null 2>&1 || return 1
+	config_get sub_timeout main subscription_timeout 60
+	_action_uint_between "$sub_timeout" 5 600 || return 1
+
+	ACTION_SOURCE_COUNT=0
+	config_list_foreach main subscription_url _count_action_source \
+		>/dev/null 2>&1 || return 1
+	source_budget=$ACTION_SOURCE_COUNT
+	[ "$source_budget" -gt 0 ] || source_budget=1
+
 	ACTION_TEMPLATE_COUNT=0
-	config_foreach _count_action_template template >/dev/null 2>&1 || {
-		printf '%s' "$ACTION_TIMEOUT_FALLBACK"
-		return
-	}
-	request_timeout=$((sub_timeout * (ACTION_TEMPLATE_COUNT + 1) + 60))
-	[ "$request_timeout" -le 3660 ] || request_timeout=3660
+	config_foreach _count_action_template template >/dev/null 2>&1 || return 1
+
+	_action_checked_multiply "$source_budget" "$sub_timeout" || return 1
+	_action_checked_add "$ACTION_CHECKED_RESULT" 60 || return 1
+	aggregate_timeout=$ACTION_CHECKED_RESULT
+	_action_checked_multiply "$ACTION_TEMPLATE_COUNT" "$sub_timeout" || return 1
+	template_budget=$ACTION_CHECKED_RESULT
+	_action_checked_add "$aggregate_timeout" "$template_budget" || return 1
+	_action_checked_add "$ACTION_CHECKED_RESULT" 60 || return 1
+	request_timeout=$ACTION_CHECKED_RESULT
+
 	case "$sub" in
 		generate) seconds=120 ;;
-		refresh) seconds=$((request_timeout + 30)) ;;
-		check|apply) seconds=$((request_timeout * 3 + 180)) ;;
-		*) seconds="$ACTION_TIMEOUT_FALLBACK" ;;
+		refresh)
+			_action_checked_multiply "$request_timeout" 3 || return 1
+			_action_checked_add "$ACTION_CHECKED_RESULT" 90 || return 1
+			seconds=$ACTION_CHECKED_RESULT
+			;;
+		check|apply)
+			_action_checked_multiply "$request_timeout" 5 || return 1
+			_action_checked_add "$ACTION_CHECKED_RESULT" 300 || return 1
+			seconds=$ACTION_CHECKED_RESULT
+			;;
+		*) return 1 ;;
 	esac
 	printf '%s' "$seconds"
 }
@@ -454,9 +506,12 @@ _spawn_update() {
 		echo "updater $UPDATE is not executable"
 		return 1
 	fi
+	action_timeout=$(_action_timeout "$sub") || {
+		echo 'invalid subscription timeout budget'
+		return 2
+	}
+	case "$action_timeout" in ''|*[!0-9]*) echo 'invalid subscription timeout budget'; return 2 ;; esac
 	token=$(_lock_acquire) || { echo 'another operation is already running'; return 75; }
-	action_timeout=$(_action_timeout "$sub")
-	case "$action_timeout" in ''|*[!0-9]*) action_timeout="$ACTION_TIMEOUT_FALLBACK" ;; esac
 	_state_write "$act" running 0 "$token" || { _lock_release_token "$token"; return 1; }
 	: > "$ACTION_ERR" 2>/dev/null || true
 	(
@@ -674,7 +729,7 @@ _tuning_apply() {
 
 status_call() {
 	config_load "$CONFIG"
-	local enabled port password sub_url def output running health update_log pass_q template_q converted_url lan_ip lan_url conv_ver healthy a_name a_state a_code a_ts a_token extra config_digest config_error current
+	local enabled port password def output running health update_log pass_q template_q converted_url lan_ip lan_url conv_ver healthy a_name a_state a_code a_ts a_token extra config_digest config_error current subscription_json subscription_size
 	config_get_bool enabled main enabled 0
 	config_get port main port 9716
 	config_error=''
@@ -683,7 +738,16 @@ status_call() {
 		*) [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || { config_error='invalid converter port'; port=0; } ;;
 	esac
 	config_get password main password '890716'
-	config_get sub_url main subscription_url ''
+	SUBSCRIPTION_SET=0
+	SUBSCRIPTION_SOURCE_COUNT=0
+	_status_subscription_url() {
+		[ -z "$1" ] && return 0
+		SUBSCRIPTION_SET=1
+		SUBSCRIPTION_SOURCE_COUNT=$((SUBSCRIPTION_SOURCE_COUNT + 1))
+		[ "$SUBSCRIPTION_SOURCE_COUNT" -le 8 ]
+	}
+	config_list_foreach main subscription_url _status_subscription_url >/dev/null 2>&1 || \
+		{ SUBSCRIPTION_SET=0; SUBSCRIPTION_SOURCE_COUNT=0; }
 	config_get def main default_template momo_template
 	config_get output main output_config '/etc/momo/profiles/config.json'
 	if "$INIT" running >/dev/null 2>&1; then running=1; else running=0; fi
@@ -723,11 +787,33 @@ status_call() {
 			fi
 		fi
 	fi
-	config_digest=$(sha256sum /etc/liquid-formula/config.yaml 2>/dev/null | awk '{print $1}')
-	case "$config_digest" in ''|*[!0-9a-f]*) config_digest=''; config_error=${config_error:-'generated config unavailable'} ;; esac
+	config_digest=$(sha256sum "$GENERATED_CONFIG" 2>/dev/null | awk '{print $1}')
+	case "$config_digest" in
+		''|*[!0-9a-f]*) config_digest=''; config_error=${config_error:-'generated config unavailable'} ;;
+		*) [ "${#config_digest}" -eq 64 ] || { config_digest=''; config_error=${config_error:-'generated config unavailable'}; } ;;
+	esac
+	subscription_json=''
+	if [ -n "$config_digest" ] && [ -x "$SUBSCRIPTION_GATEWAY" ]; then
+		subscription_json=$("$SUBSCRIPTION_GATEWAY" status \
+			--config "$GENERATED_CONFIG" \
+			--expected-digest "$config_digest" 2>/dev/null) || \
+			subscription_json=''
+	fi
+	if [ -n "$subscription_json" ]; then
+		subscription_size=$(printf '%s' "$subscription_json" | wc -c | tr -d '[:space:]')
+		case "$subscription_size" in
+			''|*[!0-9]*) subscription_json='' ;;
+			*) [ "$subscription_size" -le 32768 ] 2>/dev/null || subscription_json='' ;;
+		esac
+		case "$subscription_json" in \{*\}) ;; *) subscription_json='' ;; esac
+	fi
+	if [ -z "$subscription_json" ]; then
+		subscription_json=$(printf '{"schema":1,"overall_state":"unavailable","config_match":false,"active_generation":"","total_sources":%s,"fresh_count":0,"fallback_indices":[],"sources":[],"last_attempt":null}' \
+			"$SUBSCRIPTION_SOURCE_COUNT")
+	fi
 	update_log=$(tail -n 40 /var/log/liquid-formula/update.log 2>/dev/null | json_string)
-	printf '{"enabled":%s,"running":%s,"healthy":%s,"port":%s,"subscription_set":%s,"default_template":"%s","output_config":"%s","converted_url":"%s","lan_url":"%s","converter_version":"%s","action":"%s","action_state":"%s","action_code":%s,"config_digest":"%s","config_error":"%s","health":"%s","update_log":"%s"}\n' \
-		"$enabled" "$running" "$healthy" "$port" "$([ -n "$sub_url" ] && echo true || echo false)" \
+	printf '{"enabled":%s,"running":%s,"healthy":%s,"port":%s,"subscription_set":%s,"default_template":"%s","output_config":"%s","converted_url":"%s","lan_url":"%s","converter_version":"%s","action":"%s","action_state":"%s","action_code":%s,"config_digest":"%s","config_error":"%s","subscription":%s,"health":"%s","update_log":"%s"}\n' \
+		"$enabled" "$running" "$healthy" "$port" "$([ "$SUBSCRIPTION_SET" = 1 ] && echo true || echo false)" \
 		"$(printf '%s' "$def" | json_string)" \
 		"$(printf '%s' "$output" | json_string)" \
 		"$(printf '%s' "$converted_url" | json_string)" \
@@ -738,6 +824,7 @@ status_call() {
 		"$a_code" \
 		"$config_digest" \
 		"$(printf '%s' "$config_error" | json_string)" \
+		"$subscription_json" \
 		"$(printf '%s' "$health" | json_string)" \
 		"$update_log"
 }

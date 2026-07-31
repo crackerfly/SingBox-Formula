@@ -2,13 +2,13 @@
 
 # liquid-formula-dpi 的安装后初始化。
 #
-# 只做「新装即可用」所需的最小集合: 探测 WAN 接口、补齐默认值、启用并拉起
+# 只做「新装即可用」所需的最小集合: 补齐默认值、启用并拉起
 # 服务。luci-app-taoistfuchen 1.x -> 2.x 的历史迁移没有搬过来, 因为本包是
 # 全新命名空间, 不存在 1.x 安装基。
 
 set_default() {
 	local package="$1" section="$2" option="$3" value="$4"
-	[ -n "$(uci -q get "$package.$section.$option")" ] || \
+	uci -q get "$package.$section.$option" >/dev/null 2>&1 || \
 		uci -q set "$package.$section.$option=$value"
 }
 
@@ -32,19 +32,26 @@ fi
 mkdir -p /etc/liquid-formula/fakehttp-payloads || exit 1
 chmod 0700 /etc/liquid-formula/fakehttp-payloads 2>/dev/null || true
 
-# --- 接口探测 ----------------------------------------------------------------
-# 绑定默认路由所在的设备。缺了这一步 interface 为空, 两个服务会拒绝启动,
-# 新装用户会看到一个「已启用但没运行」的界面。
-wan_dev="$(awk '$2 == "00000000" { print $1; exit }' /proc/net/route 2>/dev/null)"
-if [ -n "$wan_dev" ]; then
-	[ -n "$(uci -q get fakehttp.main.interface)" ] || \
-		uci -q add_list "fakehttp.main.interface=$wan_dev"
-	[ -n "$(uci -q get fakesip.main.interface)" ] || \
-		uci -q add_list "fakesip.main.interface=$wan_dev"
+# --- 接口模式迁移 ------------------------------------------------------------
+# 新装使用 netifd 的官方默认 WAN 解析。老版本若保存过手动设备列表，则把它
+# 明确归类为 selected；列表本身不删除也不补写，切回手动模式仍可原样使用。
+if ! uci -q get fakehttp.main.interface_mode >/dev/null 2>&1; then
+	if uci -q get fakehttp.main.interface >/dev/null 2>&1; then
+		uci -q set fakehttp.main.interface_mode=selected
+	else
+		uci -q set fakehttp.main.interface_mode=auto
+	fi
+fi
+if ! uci -q get fakesip.main.interface_mode >/dev/null 2>&1; then
+	if uci -q get fakesip.main.interface >/dev/null 2>&1; then
+		uci -q set fakesip.main.interface_mode=selected
+	else
+		uci -q set fakesip.main.interface_mode=auto
+	fi
 fi
 
 # --- FakeHTTP 默认值 ---------------------------------------------------------
-set_default fakehttp main interface_mode selected
+set_default fakehttp main interface_mode auto
 set_default fakehttp main direction outbound
 set_default fakehttp main family dual
 set_default fakehttp main log_connections 0
@@ -68,7 +75,7 @@ fi
 uci -q delete fakehttp.main.hostname 2>/dev/null || true
 
 # --- FakeSIP 默认值 ----------------------------------------------------------
-set_default fakesip main interface_mode selected
+set_default fakesip main interface_mode auto
 set_default fakesip main direction outbound
 set_default fakesip main family dual
 # 默认排除 53: 混淆 DNS 会给每次查询多加一个 RTT, 收益小于代价。

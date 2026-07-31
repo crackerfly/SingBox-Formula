@@ -1,8 +1,8 @@
 config fakesip 'main'
 	option enabled '0'
 	option boot_delay '40'
-	# Filled with the current default-route device by uci-defaults when known.
-	option interface_mode 'selected'
+	# Resolve OpenWrt's current default WAN device at service start.
+	option interface_mode 'auto'
 	option direction 'outbound'
 	option family 'dual'
 	option port_mode 'exclude'

@@ -16,14 +16,25 @@ var callServiceList = rpc.declare({
 	expect: { '': {} }
 });
 
-function serviceRunning(name) {
+function serviceState(name) {
 	return L.resolveDefault(callServiceList(name), {}).then(function(res) {
 		var instances = res[name] && res[name].instances || {};
-		for (var key in instances)
-			if (instances[key] && instances[key].running)
-				return true;
-		return false;
+		var running = false, netdevs = [];
+		for (var key in instances) {
+			if (!instances[key] || !instances[key].running)
+				continue;
+			running = true;
+			normalizeList(instances[key].netdev).forEach(function(device) {
+				if (validInterface(device) && netdevs.indexOf(device) === -1)
+					netdevs.push(device);
+			});
+		}
+		return { running: running, netdevs: netdevs };
 	});
+}
+
+function serviceRunning(name) {
+	return serviceState(name).then(function(state) { return state.running; });
 }
 
 function listInterfaces() {
@@ -31,18 +42,6 @@ function listInterfaces() {
 		return (entries || []).map(function(entry) { return entry && entry.name; })
 			.filter(function(name) { return name && name !== 'lo' && validInterface(name); })
 			.sort();
-	});
-}
-
-function detectWanDevice() {
-	return L.resolveDefault(fs.read('/proc/net/route'), '').then(function(text) {
-		var lines = String(text || '').split(/\n/);
-		for (var i = 1; i < lines.length; i++) {
-			var fields = lines[i].trim().split(/\s+/);
-			if (fields.length > 1 && fields[1] === '00000000' && validInterface(fields[0]))
-				return fields[0];
-		}
-		return '';
 	});
 }
 
@@ -203,17 +202,17 @@ return view.extend({
 			uci.load('fakehttp'),
 			uci.load('fakesip'),
 			listInterfaces(),
-			detectWanDevice(),
 			listPayloadFiles(),
-			serviceRunning('fakehttp')
+			serviceState('fakehttp')
 		]);
 	},
 
 	render: function(data) {
 		var interfaces = data[2] || [];
-		var wanDevice = data[3] || '';
-		var payloadFiles = data[4] || [];
-		var running = data[5] || false;
+		var payloadFiles = data[3] || [];
+		var state = data[4] || { running: false, netdevs: [] };
+		var running = state.running || false;
+		var resolvedWan = state.netdevs || [];
 		var m = new form.Map('fakehttp', _('FakeHTTP'),
 			_('Router-wide TCP DPI obfuscation using FakeHTTP 0.9.18. It adds a short decoy payload to selected connections; it is not a VPN, proxy, encryption layer, or protection against manual packet analysis. Start with outbound traffic on the actual WAN device.'));
 		var s = m.section(form.NamedSection, 'main', 'fakehttp', _('Service settings'));
@@ -243,23 +242,29 @@ return view.extend({
 		};
 
 		o = s.taboption('basic', form.ListValue, 'interface_mode', _('Interface scope'));
+		o.value('auto', _('OpenWrt default WAN (recommended)'));
 		o.value('selected', _('Selected Internet-facing devices'));
 		o.value('all', _('All devices (expert mode)'));
-		o.default = 'selected';
+		o.default = 'auto';
 		o.rmempty = false;
 
+		o = s.taboption('basic', form.DummyValue, '_resolved_wan',
+			_('Current resolved WAN devices'));
+		o.cfgvalue = function() {
+			return resolvedWan.length ? resolvedWan.join(', ') : _('Unavailable');
+		};
+
 		o = s.taboption('basic', form.MultiValue, 'interface', _('Internet-facing devices'),
-			_('Select actual Linux devices, not LuCI network names. PPPoE is commonly pppoe-wan. Multiple devices are supported and duplicate selections are ignored.'));
+			_('Used only in manual mode. Select actual Linux devices, not LuCI network names. PPPoE is commonly pppoe-wan. Multiple devices are supported and duplicate selections are ignored.'));
 		interfaces.forEach(function(name) { o.value(name); });
-		if (wanDevice && interfaces.indexOf(wanDevice) !== -1)
-			o.default = [ wanDevice ];
 		o.depends('interface_mode', 'selected');
+		o.retain = true;
 		o.rmempty = true;
 		o.validate = function(sectionId, value) {
 			var enabled = optionValue(this.map, 'enabled', sectionId, '0');
-			var mode = optionValue(this.map, 'interface_mode', sectionId, 'selected');
+			var mode = optionValue(this.map, 'interface_mode', sectionId, 'auto');
 			var values = normalizeList(value);
-			if (enabled !== '1' || mode === 'all')
+			if (enabled !== '1' || mode !== 'selected')
 				return true;
 			if (enabled === '1' && mode === 'selected' && values.length === 0)
 				return _('Select at least one Internet-facing device.');

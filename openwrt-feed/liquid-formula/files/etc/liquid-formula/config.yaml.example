@@ -4,17 +4,25 @@
 server:
   port: 9716
   read_timeout: 15
-  write_timeout: 150
+  write_timeout: 240
   idle_timeout: 60
 
 auth:
   password: '890716'
 
 subscription:
-  url: ''
+  url: 'http://127.0.0.1:9717/v1/aggregate'
   user_agent: 'sing-box 1.11.0'
-  timeout: 60
+  timeout: 120
   refresh_interval: 360
+
+liquid_formula_gateway:
+  listen_address: '127.0.0.1'
+  listen_port: 9717
+  source_timeout: 60
+  aggregate_timeout: 120
+  user_agent: 'sing-box 1.11.0'
+  urls: []
 
 templates:
   momo_template:

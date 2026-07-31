@@ -40,9 +40,6 @@
         "/sys/class/net": [
           "list"
         ],
-        "/proc/net/route": [
-          "read"
-        ],
         "/sbin/logread -e fakehttp": [
           "exec"
         ],
