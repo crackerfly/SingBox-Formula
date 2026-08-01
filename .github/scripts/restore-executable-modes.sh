@@ -47,15 +47,19 @@ tests/shell/test_subscription_normalize.sh
 tests/shell/test_subscription_aggregate.sh'
 
 for relative_path in $EXECUTABLE_PATHS; do
-	if [ ! -f "$REPO_ROOT/$relative_path" ]; then
+	if [ ! -f "$REPO_ROOT/$relative_path" ] || [ -L "$REPO_ROOT/$relative_path" ]; then
 		printf 'restore-executable-modes: missing required file: %s\n' "$relative_path" >&2
 		exit 1
 	fi
 done
 
+find "$REPO_ROOT" \
+	-name .git -prune -o \
+	-type f -exec chmod 0644 {} +
+
 count=0
 for relative_path in $EXECUTABLE_PATHS; do
-	if [ -e "$REPO_ROOT/$relative_path" ]; then
+	if [ -f "$REPO_ROOT/$relative_path" ] && [ ! -L "$REPO_ROOT/$relative_path" ]; then
 		chmod 0755 "$REPO_ROOT/$relative_path"
 		count=$((count + 1))
 	else

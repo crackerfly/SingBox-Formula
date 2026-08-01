@@ -4,9 +4,9 @@
 
 [简体中文](#zh-cn) · [English](#english)
 
-**当前源码版本 / Current source version:** `1.8.4`
+**当前源码版本 / Current source version:** `1.8.5`
 
-[1.8.4 双语发布说明 / Bilingual release notes](docs/RELEASE_NOTES_1.8.4.md)
+[1.8.5 双语发布说明 / Bilingual release notes](docs/RELEASE_NOTES_1.8.5.md)
 
 <a id="zh-cn"></a>
 
@@ -27,25 +27,18 @@ sing-box 本身**。如果系统中已有兼容的 `sing-box` 命令，更新流
 FakeHTTP 和 FakeSIP 只是数据包混淆辅助工具，不是 VPN、代理或加密层，也不能保证
 对抗人工流量分析。
 
-### 1.8.4 更新摘要
+### 1.8.5 更新摘要
 
-- 内置附件提供的最新版 `momo-template.json` 和 `localdns-template.json`；两者在新安装
-  中均启用，`momo_template` 仍是默认模板。升级时继续把模板作为 conffile 处理，不会
-  无条件覆盖用户编辑。
-- 模板上传、保存、重命名、启用状态变化或删除成功后，模板表格和 **Default
-  template** 下拉列表会从同一份最新 RPC 结果同步刷新，无需刷新页面，也不会清除其他
-  尚未保存的表单值。
-- 支持 1–8 个有序订阅 URL 和失败策略 B：某个 URL 拉取失败时，只能使用与该 URL
-  加密绑定且仍有效的旧缓存；如果没有有效缓存，整次更新失败并继续使用上一份完整配置。
-- 支持 sing-box JSON、URI 列表及仅包含根级 `proxies` 的 Clash/Mihomo YAML；不会获取
-  或递归处理 `proxy-providers`。精确重复节点保留首项；同名但内容不同的节点全部保留并
-  获得稳定、唯一的编号。
-- FakeHTTP/FakeSIP 自动模式通过 OpenWrt 官方 `network.sh` API 解析当前默认 IPv4/IPv6
-  WAN 的实际 L3 设备；手动选择始终优先。自动模式不实现 mwan3 或多 WAN 策略扩展。
-- 保留已审查的 Tuning 事务修复、卸载保护和既有 DPI 行为；不会卸载 `momo` 或
-  `luci-app-momo`。NFQUEUE `8970`/`8971` 及 FakeSIP 默认排除 UDP 53 均未改变。
-- 原转换器目录 `openwrt-feed/liquid-formula/src` 与 1.8.3 保持字节不变；多订阅聚合器
-  位于该冻结目录之外，并由同一 OpenWrt Go 构建流程从源码编译。
+- Actions 先将 `.git` 外的所有普通文件规范化为 `0644`，再仅把经过审核的 36 个路径恢复为
+  `0755`。
+- 仓库中的所有跟踪文件必须以 `100644` 提交；若 `core.fileMode` 等操作把虚假执行位写入
+  Git 索引，源码包校验会失败并直接列出相关文件，而不是只报告难以定位的 tree digest。
+- 订阅网关统一将不同 Linux 架构的 `Stat_t.Nlink` 转换为 `uint64`，并在 SDK 矩阵前增加
+  `amd64`、`arm`、`arm64` 交叉编译覆盖。
+- 转换器源码核验使用离线的路径、mode 和 SHA-256 清单，不再在浅克隆中运行时依赖 1.8.3
+  Git 对象。
+- 冻结的转换器 Go 源码没有任何字节变化；源码/权限测试覆盖正确的全 `100644` 索引、对
+  全 `100755` 错误提交的明确拒绝，以及单提交历史，完整发布验证矩阵另行记录。
 
 ### 软件包组成
 
@@ -280,8 +273,8 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
 110 个文件”方案。
 
 1. 解压完整源码包。
-2. 进入 `Liquid-Formula-1.8.4`，把其**内部内容**上传到仓库根目录；不要上传 ZIP，
-   也不要额外保留一层 `Liquid-Formula-1.8.4`。
+2. 进入 `Liquid-Formula-1.8.5`，把其**内部内容**上传到仓库根目录；不要上传 ZIP，
+   也不要额外保留一层 `Liquid-Formula-1.8.5`。
 3. 显示并上传所有隐藏文件。macOS Finder 可按 `Command + Shift + .`，Windows
    Explorer 可启用“显示隐藏的项目”。
 4. 如果网页限制单次文件数量，可按目录分成多轮上传，但必须保持原相对路径。
@@ -289,8 +282,10 @@ Check 和 Update 在转换器未运行时会临时启动它；完成后只停止
    - 根目录 `.github/`、`.gitignore` 与 `.gitattributes`
    - Go 源码和第三方源码中的 `.gitignore`、`.github`、`.clang-format`
    - `third_party/sources/` 中两个源码压缩包与 `third_party/SHA256SUMS`
-6. GitHub 网页上传不会保留 Unix 可执行位。Actions 会在 checkout 后立即通过
-   `.github/scripts/restore-executable-modes.sh` 恢复经过审核的可执行文件权限。
+6. 仓库中的所有文件必须以 Git mode `100644` 提交。Actions 会在 checkout 后立即通过
+   `.github/scripts/restore-executable-modes.sh` 将 `.git` 外的普通文件规范化为 `0644`，再
+   仅恢复经过审核的 36 个运行时路径为 `0755`。若提交包含虚假 `100755` mode，源码包
+   校验会列出相关文件并失败。
 7. 两份 Makefile 的 `PKG_VERSION` 必须一致。通过多轮上传发布新版本时，建议将
    版本号变更放在最后一轮，避免中间状态提前触发正式发布。
 
@@ -308,7 +303,7 @@ Actions 行为：
 从源码交叉编译；仓库不包含预编译 ELF。第三方维护源码、对应归档和 SHA-256
 信息见 [`THIRD_PARTY_SOURCES.md`](THIRD_PARTY_SOURCES.md)。
 
-1.8.4 没有修改冻结的原转换器 Go 树 `openwrt-feed/liquid-formula/src`。多订阅网关源码
+1.8.5 没有修改冻结的原转换器 Go 树 `openwrt-feed/liquid-formula/src`。多订阅网关源码
 放在 `src-subscription-gateway`，构建时才复制到现有 Go module 的独立 `cmd` 包中；
 这既复用锁定依赖，也保持原转换器源码可逐字节核验。
 
@@ -394,29 +389,20 @@ required for proxying, routing, firewall policy, access control, and profile sch
 FakeHTTP and FakeSIP are packet-obfuscation helpers only. They are not a VPN, proxy, or
 encryption layer and do not guarantee resistance to manual traffic analysis.
 
-### 1.8.4 highlights
+### 1.8.5 highlights
 
-- Ships the updated supplied `momo-template.json` and `localdns-template.json`. Both are enabled
-  on a new installation, while `momo_template` remains the default. Package upgrades continue to
-  treat them as conffiles instead of unconditionally overwriting user edits.
-- After a template is uploaded, saved, renamed, enabled/disabled, or deleted, the template table
-  and **Default template** choices refresh atomically from one authoritative RPC result. No page
-  reload is needed and unrelated dirty form values are preserved.
-- Supports one to eight ordered subscription URLs with failure policy B. A failed URL may fall
-  back only to a still-valid old cache cryptographically bound to that exact URL; without such a
-  cache the operation fails and the previous complete configuration remains selected.
-- Accepts sing-box JSON, URI lists, and Clash/Mihomo YAML with root-level inline `proxies` only.
-  It never fetches or recursively expands `proxy-providers`. Exact duplicate nodes keep the first
-  occurrence; same-name nodes with different content are retained under stable unique numbering.
-- FakeHTTP/FakeSIP auto mode resolves the actual L3 device for the current OpenWrt default IPv4
-  and IPv6 WAN through the official `network.sh` API. Explicit manual selection always wins; auto
-  mode does not add mwan3 or multi-WAN policy handling.
-- Preserves the reviewed Tuning transaction fixes, uninstall safeguards, and existing DPI
-  behavior. Removal never uninstalls `momo` or `luci-app-momo`; NFQUEUE `8970`/`8971` and
-  FakeSIP's default UDP 53 exclusion are unchanged.
-- The original converter tree at `openwrt-feed/liquid-formula/src` is byte-identical to 1.8.3.
-  The multi-source gateway lives outside that frozen tree and is compiled from source by the same
-  OpenWrt Go build flow.
+- Actions first normalizes every regular file outside `.git` to `0644`, then restores exactly the
+  36 reviewed executable-allowlist paths to `0755`.
+- Every tracked repository file must be committed as `100644`. If `core.fileMode` or another tool
+  records false executable bits, source-package validation fails and lists the offending paths
+  instead of reporting only an opaque tree digest.
+- The subscription gateway converts architecture-dependent `Stat_t.Nlink` fields to `uint64` and
+  adds `amd64`, `arm`, and `arm64` cross-compilation coverage before the SDK matrix.
+- Converter-source verification uses an offline path/mode/SHA-256 manifest and no longer needs a
+  runtime 1.8.3 Git object in a shallow checkout.
+- The frozen converter Go source is byte-for-byte unchanged. Source/permission tests cover a valid
+  all-`100644` index, explicit rejection of an invalid all-`100755` commit, and single-commit
+  history; final release-matrix verification is recorded separately.
 
 ### Packages
 
@@ -663,8 +649,8 @@ The repository supports a source-only workflow through GitHub's web uploader. Do
 obsolete fixed “two batches / 110 files” instructions from older README versions.
 
 1. Extract the complete source archive.
-2. Enter `Liquid-Formula-1.8.4` and upload its **contents** to the repository root. Do not upload
-   the ZIP or retain `Liquid-Formula-1.8.4` as an extra directory level.
+2. Enter `Liquid-Formula-1.8.5` and upload its **contents** to the repository root. Do not upload
+   the ZIP or retain `Liquid-Formula-1.8.5` as an extra directory level.
 3. Reveal and include hidden files. Press `Command + Shift + .` in macOS Finder, or enable hidden
    items in Windows Explorer.
 4. If the browser limits one upload, split it by directory across several commits while preserving
@@ -673,8 +659,10 @@ obsolete fixed “two batches / 110 files” instructions from older README vers
    - root `.github/`, `.gitignore`, and `.gitattributes`;
    - nested `.gitignore`, `.github`, and `.clang-format` files in Go/third-party source;
    - both source archives in `third_party/sources/` and `third_party/SHA256SUMS`.
-6. Web upload does not preserve Unix executable bits. Immediately after checkout, Actions invokes
-   `.github/scripts/restore-executable-modes.sh` to restore only the reviewed executable allowlist.
+6. Every repository file must be committed with Git mode `100644`. Immediately after checkout,
+   Actions invokes `.github/scripts/restore-executable-modes.sh` to normalize every regular file
+   outside `.git` to `0644`, then restore only the 36 reviewed runtime paths to `0755`. If a commit
+   contains false `100755` modes, source-package validation lists the offending paths and fails.
 7. The two package Makefiles must contain the same `PKG_VERSION`. In a multi-round release upload,
    upload the version bump last to avoid publishing an incomplete intermediate tree.
 
@@ -694,7 +682,7 @@ OpenWrt SDK. No precompiled ELF is stored in the repository. See
 [`THIRD_PARTY_SOURCES.md`](THIRD_PARTY_SOURCES.md) for maintained-source provenance, archives,
 and SHA-256 records.
 
-Release 1.8.4 does not modify the frozen original converter Go tree at
+Release 1.8.5 does not modify the frozen original converter Go tree at
 `openwrt-feed/liquid-formula/src`. The multi-subscription gateway lives in
 `src-subscription-gateway` and is copied into a separate `cmd` package in the existing Go module
 only at build time. This reuses the locked dependency set while keeping the original converter

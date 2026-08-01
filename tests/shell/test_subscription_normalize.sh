@@ -6,12 +6,12 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 
 . "$SCRIPT_DIR/harness.sh"
+. "$SCRIPT_DIR/source_manifest.sh"
 
 SOURCE_DIR="$REPO_ROOT/openwrt-feed/liquid-formula/src"
 HELPER_DIR="$REPO_ROOT/openwrt-feed/liquid-formula/src-subscription-gateway"
 FIXTURE_DIR="$REPO_ROOT/tests/subscription/fixtures"
-BASELINE_183_COMMIT=a60f59308847acc79d166794488149df6d08ad46
-FROZEN_SOURCE_TREE=d4f299087af3fdb87f7728846425d48edfeb7ae4
+FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.3.manifest"
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-normalizer-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -30,24 +30,14 @@ else
 	exit $?
 fi
 
-source_digest()
-{
-	find "$SOURCE_DIR" -type f -exec sha256sum {} \; |
-		sed "s#$SOURCE_DIR/##" |
-		LC_ALL=C sort |
-		sha256sum |
-		cut -d' ' -f1
-}
-
-SOURCE_DIGEST_BEFORE=$(source_digest)
-assert_equal \
-	"$FROZEN_SOURCE_TREE" \
-	"$(git -C "$REPO_ROOT" rev-parse "$BASELINE_183_COMMIT:openwrt-feed/liquid-formula/src")" \
-	"the recorded 1.8.3 baseline resolves to the frozen converter tree"
+SOURCE_MANIFEST_BEFORE="$TEST_TMP/converter-source-before.manifest"
 assert_command_success \
-	"the working converter source has no tracked or untracked differences from 1.8.3" \
-	git -C "$REPO_ROOT" diff --quiet "$BASELINE_183_COMMIT" -- \
-	openwrt-feed/liquid-formula/src
+	"writes the converter source manifest before normalizer tests" \
+	write_source_manifest "$SOURCE_DIR" "$SOURCE_MANIFEST_BEFORE"
+assert_files_equal \
+	"$FROZEN_SOURCE_MANIFEST" \
+	"$SOURCE_MANIFEST_BEFORE" \
+	"the converter source matches the frozen manifest before normalizer tests"
 
 STAGED_MODULE="$TEST_TMP/module"
 mkdir -p "$STAGED_MODULE/cmd/liquid-formula-subscription-gateway"
@@ -183,14 +173,9 @@ assert_command_success \
 	run_go build -o "$TEST_TMP/liquid-formula-subscription-gateway" \
 	./cmd/liquid-formula-subscription-gateway
 
-# 上面那次 build 只覆盖 runner 自己的 amd64。unix.Stat_t 这类结构体的字段
-# 宽度随架构变化 (Nlink 在 amd64 上是 uint64, 在 arm/arm64/386/mips/riscv64
-# 上是 uint32), 宿主机编译永远发现不了, 只会在 43 个 SDK 构建里全军覆没。
-#
-# 默认这三个覆盖了发布矩阵里全部三种字段布局: amd64 (64 位, Nlink uint64)、
-# arm64 (64 位, Nlink uint32)、arm (32 位)。每个冷缓存约 35 秒。想在本地跑
-# 全量, 用 LIQUID_FORMULA_CROSS_GOARCHES 覆盖:
-#   LIQUID_FORMULA_CROSS_GOARCHES='386 amd64 arm arm64 loong64 mips mips64 mipsle riscv64'
+# The native build above covers only the runner architecture. unix.Stat_t
+# field widths vary by target, so compile representative 64-bit uint64-Nlink,
+# 64-bit uint32-Nlink, and 32-bit layouts before the SDK matrix begins.
 for normalizer_goarch in ${LIQUID_FORMULA_CROSS_GOARCHES:-amd64 arm arm64}; do
 	assert_command_success \
 		"the staged normalizer cross-compiles for linux/$normalizer_goarch" \
@@ -244,14 +229,17 @@ assert_not_contains \
 	'must-not-be-logged|secret-token|https?://' \
 	"unknown-format diagnostics do not echo the source"
 
-SOURCE_DIGEST_AFTER=$(source_digest)
-assert_equal \
-	"$SOURCE_DIGEST_BEFORE" \
-	"$SOURCE_DIGEST_AFTER" \
-	"staging, testing, and building leave every frozen source byte unchanged"
+SOURCE_MANIFEST_AFTER="$TEST_TMP/converter-source-after.manifest"
 assert_command_success \
-	"the converter source remains identical to the 1.8.3 baseline after the build" \
-	git -C "$REPO_ROOT" diff --quiet "$BASELINE_183_COMMIT" -- \
-	openwrt-feed/liquid-formula/src
+	"writes the converter source manifest after normalizer tests" \
+	write_source_manifest "$SOURCE_DIR" "$SOURCE_MANIFEST_AFTER"
+assert_files_equal \
+	"$SOURCE_MANIFEST_BEFORE" \
+	"$SOURCE_MANIFEST_AFTER" \
+	"staging, testing, and building leave the converter source manifest unchanged"
+assert_files_equal \
+	"$FROZEN_SOURCE_MANIFEST" \
+	"$SOURCE_MANIFEST_AFTER" \
+	"the converter source matches the frozen manifest after normalizer tests"
 
 finish_tests

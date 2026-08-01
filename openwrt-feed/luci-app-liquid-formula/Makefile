@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI app for Liquid Formula
-PKG_VERSION:=1.8.4
+PKG_VERSION:=1.8.5
 PKG_RELEASE:=1
 # irqbalance 是 Tuning Utility 页上的一个开关, 装了包就应该随时能开, 所以
 # 直接依赖它而不是让用户自己发现要另装。

@@ -6,6 +6,7 @@ SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 
 . "$SCRIPT_DIR/harness.sh"
+. "$SCRIPT_DIR/source_manifest.sh"
 
 PACKAGE_DIR="$REPO_ROOT/openwrt-feed/liquid-formula"
 SOURCE_DIR=${SOURCE_DIR:-"$PACKAGE_DIR/src"}
@@ -17,6 +18,7 @@ UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manife
 PATCHED_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.patched-paths"
 LOCAL_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-local-paths"
 TEMPLATE_HASHES="$SCRIPT_DIR/fixtures/template-1.8.4.sha256"
+FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.3.manifest"
 UPSTREAM_COMMIT=8222509aff98229886d304ef72e1d0affb087a62
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 LUMBERJACK_MIT_SHA256=4eb222b860ec541a0f981a01de5454ba50d09d38b2d09fa6894ed0bf6331293e
@@ -28,31 +30,9 @@ LOCALDNS_TEMPLATE_SHA256=9dc80b9caf2eba67ca4b542c480a10a3f88ef8082903a3c10f31a14
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-source-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
-write_source_manifest() {
-	manifest_root=$1
-	manifest_output=$2
-
-	find "$manifest_root" -type f \
-		! -path "$manifest_root/UPSTREAM_COMMIT" \
-		! -path "$manifest_root/LICENSES/GPL-3.0-or-later.txt" \
-		! -path "$manifest_root/LICENSES/MIT-lumberjack.txt" \
-		-exec sh -c '
-			root=$1
-			shift
-			for file do
-				relative_path=${file#"$root"/}
-				mode=$(stat -c %a "$file") || exit 1
-				case $mode in
-					644) git_mode=100644 ;;
-					755) git_mode=100755 ;;
-					*) git_mode=unsupported-$mode ;;
-				esac
-				hash=$(sha256sum "$file") || exit 1
-				hash=${hash%% *}
-				printf "%s\t%s\t%s\n" "$relative_path" "$git_mode" "$hash"
-			done
-		' sh "$manifest_root" {} + | LC_ALL=C sort > "$manifest_output"
-}
+# 仓库约定所有跟踪文件提交为 100644，执行位由 restore-executable-modes.sh 运行时恢复
+tracked_modes=$(git -C "$REPO_ROOT" ls-files -s | awk '$1!="100644"{sub(/^[^\t]*\t/,""); print}')
+assert_equal "" "$tracked_modes" "every tracked file is committed as 100644"
 
 find_elf_files() {
 	find "$1" -type f -exec sh -c '
@@ -77,10 +57,14 @@ assert_equal "$GO_SOURCE_TREE" "$fixture_go_source_tree" "records the unchanged 
 assert_equal "$MOMO_TEMPLATE_SHA256" "$(template_sha256 momo-template.json)" "records the supplied momo template hash"
 assert_equal "$LOCALDNS_TEMPLATE_SHA256" "$(template_sha256 localdns-template.json)" "records the supplied local DNS template hash"
 
-baseline_go_source_tree=$(git -C "$REPO_ROOT" rev-parse "$BASELINE_183_COMMIT:openwrt-feed/liquid-formula/src" 2>/dev/null || true)
-assert_equal "$GO_SOURCE_TREE" "$baseline_go_source_tree" "maps the 1.8.3 baseline to the recorded Go-source tree"
-actual_go_source_tree=$(git -C "$REPO_ROOT" rev-parse "HEAD:openwrt-feed/liquid-formula/src" 2>/dev/null || true)
-assert_equal "$GO_SOURCE_TREE" "$actual_go_source_tree" "keeps the Go source tree at the recorded digest"
+ACTUAL_SOURCE_MANIFEST="$TEST_TMP/converter-source.manifest"
+assert_command_success \
+	"writes the working converter source manifest" \
+	write_source_manifest "$SOURCE_DIR" "$ACTUAL_SOURCE_MANIFEST"
+assert_files_equal \
+	"$FROZEN_SOURCE_MANIFEST" \
+	"$ACTUAL_SOURCE_MANIFEST" \
+	"keeps the working converter source identical to the frozen 1.8.3 manifest"
 
 assert_file_sha256 \
 	"$MOMO_TEMPLATE_SHA256" \
@@ -218,12 +202,12 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.4[[:space:]]*$' \
-	"sets main package version 1.8.4 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.5[[:space:]]*$' \
+	"sets main package version 1.8.5 in active top-level metadata"
 assert_make_top_level_contains \
 	"$LUCI_PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.4[[:space:]]*$' \
-	"sets LuCI package version 1.8.4 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.5[[:space:]]*$' \
+	"sets LuCI package version 1.8.5 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \
