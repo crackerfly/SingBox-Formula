@@ -61,6 +61,16 @@ jobs:
           go-version: '1.26.4'
           cache-dependency-path: openwrt-feed/liquid-formula/src/go.sum
 
+      - name: Compile converter for representative architectures
+        run: |
+          set -eux
+          cd openwrt-feed/liquid-formula/src
+          for goarch in amd64 arm arm64; do
+            output="${RUNNER_TEMP}/sb-sub-c-${goarch}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build -trimpath -o "$output" .
+            test -s "$output"
+          done
+
       # Vendored third-party sources are pinned by hash. Verify before anything
       # else so a swapped FakeHTTP/FakeSIP tarball fails in seconds rather than
       # after the whole architecture matrix has built it.
@@ -73,12 +83,8 @@ jobs:
         run: |
           set -eux
           for test_script in tests/shell/test_*.sh; do
-            if [ "${test_script}" = tests/shell/test_subscription_normalize.sh ]; then
-              continue
-            fi
             sh "${test_script}"
           done
-          LIQUID_FORMULA_NORMALIZER_RACE=1 sh tests/shell/test_subscription_normalize.sh
           node --check openwrt-feed/luci-app-liquid-formula/root/www/luci-static/resources/view/liquid-formula/overview.js
           # node --check 只验语法。这一步真的把每个视图 load()+render() 跑一遍,
           # 未定义变量之类的运行时错误才会在 CI 里暴露。
@@ -117,7 +123,6 @@ jobs:
       - name: Verify the converter still builds on OpenWrt 24.10's Go
         run: |
           set -eux
-          GO_BIN=go sh tests/shell/test_subscription_normalize.sh
           cd openwrt-feed/liquid-formula/src
           go version
           go build ./...

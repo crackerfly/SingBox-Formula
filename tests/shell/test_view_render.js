@@ -13,7 +13,6 @@ const fs = require('fs');
 const ROOT = path.resolve(__dirname, '../..');
 const VIEW_DIR = path.join(ROOT,
 	'openwrt-feed/luci-app-liquid-formula/root/www/luci-static/resources/view/liquid-formula');
-const BUDGET_CASES = path.join(ROOT, 'tests/subscription/budget-cases.tsv');
 
 let failures = 0;
 let checks = 0;
@@ -47,14 +46,6 @@ function makeTextNode(value) {
 function isNode(value) {
 	return value != null && typeof value === 'object' &&
 		(value.nodeType === 1 || value.nodeType === 3);
-}
-
-function normalizeList(value) {
-	if (Array.isArray(value))
-		return value.slice();
-	if (value == null || value === '')
-		return [];
-	return [ String(value) ];
 }
 
 function makeElement(tag, attrs, children) {
@@ -195,55 +186,10 @@ class StubOption {
 		this.validState = this.validate ? this.validate(sectionId,
 			this._renderedElement ? this._renderedElement.value : '') : true;
 	}
-	cfgvalue(sectionId) {
-		return uci.get(this.map.config, sectionId, this.option);
-	}
-	formvalue(sectionId) {
-		const type = this.type && this.type._formTypeName;
-		if (type === 'DynamicList')
-			return this._renderedElement ? this._renderedElement.getValue() : [];
-		return this._renderedElement ? this._renderedElement.value : '';
-	}
-	write(sectionId, value) {
-		const stored = Array.isArray(value) ? value.slice() : value;
-		uci.set(this.map.config, sectionId, this.option, stored);
-		const runtime = this.map._runtime;
-		if (runtime) {
-			runtime.formValueChanges.push({ option: this.option, value: stored });
-			const changes = uci._changes[this.map.config] || (uci._changes[this.map.config] = []);
-			changes.push([ 'set', sectionId, this.option, stored ]);
-		}
-	}
-	remove(sectionId) {
-		uci.unset(this.map.config, sectionId, this.option);
-		const runtime = this.map._runtime;
-		if (runtime) {
-			const changes = uci._changes[this.map.config] || (uci._changes[this.map.config] = []);
-			changes.push([ 'delete', sectionId, this.option ]);
-		}
-	}
 	parse(sectionId) {
-		const type = this.type && this.type._formTypeName;
-		const value = this.formvalue(sectionId);
-		let result = true;
-		/*
-		 * Match stock LuCI's form.DynamicList -> ui.DynamicList boundary:
-		 * getValidator() is attached only to the optional "add item" text
-		 * input. Existing hidden list items are not passed through it again
-		 * by AbstractValue.parse().
-		 */
-		if (this.validate && type !== 'DynamicList')
-			result = this.validate(sectionId, value);
-		if (result !== true)
-			return Promise.reject(new Error(String(result)));
-		if (type === 'DynamicList') {
-			if (value.length)
-				this.write(sectionId, value);
-			else
-				this.remove(sectionId);
-			return Promise.resolve(value.slice());
-		}
-		return Promise.resolve(value);
+		const value = this._renderedElement ? this._renderedElement.value : '';
+		const result = this.validate ? this.validate(sectionId, value) : true;
+		return result === true ? Promise.resolve(value) : Promise.reject(new Error(String(result)));
 	}
 }
 
@@ -281,14 +227,9 @@ class StubMap {
 		this.sections.push(s);
 		return s;
 	}
-	lookupOption(name, sectionId) {
-		const matches = this.sections.reduce((found, section) =>
-			found.concat(section.options.filter((option) => option.option === name)), []);
-		if (sectionId != null) {
-			const option = matches.find((candidate) => candidate.section_id === sectionId);
-			return option ? [ option, sectionId ] : null;
-		}
-		return matches;
+	lookupOption(name) {
+		return this.sections.reduce((matches, section) =>
+			matches.concat(section.options.filter((option) => option.option === name)), []);
 	}
 	render() {
 		this.renderCalls = (this.renderCalls || 0) + 1;
@@ -296,67 +237,22 @@ class StubMap {
 		const runtime = this._runtime;
 		this.sections.forEach((section) => section.options.forEach((option) => {
 			const type = option.type && option.type._formTypeName;
-			if (type !== 'ListValue' && type !== 'Value' && type !== 'TextValue' &&
-			    type !== 'DynamicList' && type !== 'Flag')
+			if (type !== 'ListValue' && type !== 'Value')
 				return;
 			const recordChange = function(value) {
-				runtime.formValueChanges.push({ option: option.option, value: value });
+				runtime.formValueChanges.push({ option: option.option, value });
 				uci._data[`${this.config}.${option.section_id}.${option.option}`] = value;
 				const changes = uci._changes[this.config] || (uci._changes[this.config] = []);
 				changes.push([ 'set', option.section_id, option.option, value ]);
 			}.bind(this);
-			if (type === 'Value' || type === 'Flag') {
+			if (type === 'Value') {
 				const input = makeElement('input', {
 					'id': `cbid.${this.config}.${option.section_id}.${option.option}`,
 					'value': uci.get(this.config, option.section_id, option.option) || option.default || ''
 				});
 				input.addEventListener('input', function() { recordChange(input.value); });
-				option._renderedElement = input;
 				runtime.formInputs[option.option] = input;
 				root.appendChild(input);
-				return;
-			}
-			if (type === 'TextValue') {
-				const value = option.cfgvalue(option.section_id);
-				const textarea = makeElement('textarea', {
-					'id': `cbid.${this.config}.${option.section_id}.${option.option}`,
-					'value': value == null ? (option.default || '') : value
-				});
-				textarea.addEventListener('input', function() { recordChange(textarea.value); });
-				option._renderedElement = textarea;
-				runtime.textValues[option.option] = textarea;
-				root.appendChild(textarea);
-				return;
-			}
-			if (type === 'DynamicList') {
-				const list = makeElement('div', {
-					'id': `cbid.${this.config}.${option.section_id}.${option.option}`
-				});
-				list.inputs = [];
-				list.setValue = function(value) {
-					const values = normalizeList(value);
-					while (list.firstChild)
-						list.removeChild(list.firstChild);
-					const accepted = values.filter((item, index) =>
-						(runtime.luciBranch !== '24.10' && option.allowduplicates) ||
-						values.indexOf(item) === index);
-					list.inputs = accepted.map((item, index) => {
-						const input = makeElement('input', {
-							'id': `${list.attributes.id}.${index}`,
-							'value': item
-						});
-						input.value = item;
-						list.appendChild(input);
-						return input;
-					});
-				};
-				list.getValue = function() {
-					return list.inputs.map((input) => input.value);
-				};
-				list.setValue(uci.get(this.config, option.section_id, option.option));
-				option._renderedElement = list;
-				runtime.dynamicLists[option.option] = list;
-				root.appendChild(list);
 				return;
 			}
 			const select = makeElement('select', {
@@ -380,7 +276,7 @@ class StubMap {
 				});
 			};
 			select.replaceOptions(option.keylist.map((value, index) => ({
-				value: value, label: option.vallist[index]
+				value, label: option.vallist[index]
 			})));
 			select.value = uci.get(this.config, option.section_id, option.option) || option.keylist[0] || '';
 			select.addEventListener('change', function() {
@@ -395,42 +291,20 @@ class StubMap {
 	}
 	parse() {
 		const sectionId = 'main';
-		const options = this.sections.reduce((all, section) =>
-			all.concat(section.options), []);
-		const values = Object.create(null);
-
-		options.forEach((option) => {
-			if (option._renderedElement)
-				values[option.option] = option.formvalue(sectionId);
-			else
-				values[option.option] = uci.get(this.config, sectionId, option.option);
-		});
-
-		options.forEach((option) => {
+		this.sections.forEach((section) => section.options.forEach((option) => {
 			if (!option.deps.length)
 				return;
 			const active = option.deps.some((dep) =>
-				String(values[dep[0]] == null ? '' : values[dep[0]]) === String(dep[1]));
-			/*
-			 * Stock LuCI AbstractValue.parse() removes an inactive option
-			 * unless the view explicitly marks it retain=true.
-			 */
+				String(uci.get(this.config, sectionId, dep[0]) || '') === String(dep[1]));
 			if (!active && !option.retain)
-				option.remove(sectionId);
-		});
-
-		options.forEach((option) => {
-			const type = option.type && option.type._formTypeName;
-			if (type === 'ListValue' && option._renderedElement)
-				option.write(sectionId, option.formvalue(sectionId));
-		});
+				uci.unset(this.config, sectionId, option.option);
+		}));
 		return Promise.resolve();
 	}
 	save() { return Promise.resolve(); }
 }
 
-function installGlobals(rpcResponses, options) {
-	options = options || {};
+function installGlobals(rpcResponses) {
 	renderedMaps = [];
 	const createdNodes = [];
 	const runtime = {
@@ -440,10 +314,6 @@ function installGlobals(rpcResponses, options) {
 		listeners: Object.create(null),
 		listValues: Object.create(null),
 		listValueChanges: [],
-		luciBranch: options.luciBranch || '25.12',
-		dynamicLists: Object.create(null),
-		subscriptionWrites: [],
-		textValues: Object.create(null),
 		formInputs: Object.create(null),
 		formValueChanges: [],
 		fsReads: [],
@@ -601,16 +471,9 @@ function installGlobals(rpcResponses, options) {
 		},
 		set(config, section, option, value) {
 			this._data[`${config}.${section}.${option}`] = value;
-			if (config === 'liquid_formula' && option === 'subscription_url')
-				runtime.subscriptionWrites.push({
-					option: option,
-					value: Array.isArray(value) ? value.slice() : value
-				});
 		},
 		unset(config, section, option) {
 			delete this._data[`${config}.${section}.${option}`];
-			if (config === 'liquid_formula' && option === 'subscription_url')
-				runtime.subscriptionWrites.push({ option: option, value: null });
 		},
 		sections() { return []; },
 		save() { return Promise.resolve(); },
@@ -686,6 +549,7 @@ function installGlobals(rpcResponses, options) {
 			this.onload({ target: { result: file.content } });
 		}
 	};
+	global.confirm = function() { return true; };
 	global.fs = {
 		read(file) {
 			runtime.fsReads.push(file);
@@ -731,174 +595,8 @@ function isLiteralText(node, value) {
 		findNodes(node, (child) => child.nodeType === 3 && child.data.includes(value)).length > 0;
 }
 
-async function exerciseSubscriptionTextValueContracts(luciBranch) {
-	const runtime = installGlobals({ status: {}, list_templates: { templates: [] } }, {
-		luciBranch: luciBranch
-	});
-	const sourceA = 'https://first.example/sub?token=alpha&region=東京';
-	const sourceB = "https://second.example/O'Brien?encoded=%27&name=O%27Brien";
-	const initial = [ sourceA, sourceB, sourceA ];
-	const eight = [
-		sourceA,
-		sourceB,
-		'http://third.example/sub?x=3&label=三',
-		'https://fourth.example/sub?x=4',
-		'https://fifth.example/sub?x=5',
-		'https://sixth.example/sub?x=6',
-		'https://seventh.example/sub?x=7',
-		sourceA
-	];
-	uci._data['liquid_formula.main.enabled'] = '1';
-	uci._data['liquid_formula.main.subscription_url'] = initial.slice();
-
-	let mod;
-	try {
-		mod = new Function(fs.readFileSync(path.join(VIEW_DIR, 'overview.js'), 'utf8'))();
-		const data = await mod.load();
-		await mod.render(data);
-	} catch (error) {
-		fail(`overview subscription fixture renders with LuCI ${luciBranch} semantics`, error);
-		return;
-	}
-
-	const map = renderedMaps.find((candidate) => candidate.config === 'liquid_formula');
-	const options = map ? map.sections.flatMap((section) => section.options) : [];
-	const subscriptionUrls = options.find((candidate) => candidate.option === 'subscription_url');
-	const textWidget = runtime.textValues.subscription_url;
-	const enabledWidget = runtime.formInputs.enabled;
-	const check = (condition, description) => condition ? ok(description) : fail(description);
-	const sameList = (left, right) => Array.isArray(left) && Array.isArray(right) &&
-		left.length === right.length && left.every((value, index) => value === right[index]);
-
-	check(subscriptionUrls && subscriptionUrls.type &&
-		subscriptionUrls.type._formTypeName === 'TextValue' && textWidget,
-		`LuCI ${luciBranch} renders subscription URLs as one stable TextValue`);
-	if (!subscriptionUrls || !textWidget || !enabledWidget)
-		return;
-
-	check(textWidget.value === initial.join('\n'),
-		`LuCI ${luciBranch} initially renders [A, B, A] in exact order`);
-
-	const parseText = async (text, liveEnabled, savedEnabled) => {
-		uci._data['liquid_formula.main.enabled'] = savedEnabled ? '1' : '0';
-		enabledWidget.value = liveEnabled ? '1' : '0';
-		textWidget.value = text;
-		const writesBefore = runtime.subscriptionWrites.length;
-		let accepted = true;
-		try {
-			await subscriptionUrls.parse('main');
-		} catch (error) {
-			accepted = false;
-		}
-		return {
-			accepted: accepted,
-			writes: runtime.subscriptionWrites.slice(writesBefore),
-			stored: uci._data['liquid_formula.main.subscription_url']
-		};
-	};
-
-	runtime.formInputs.boot_delay.value = '123';
-	const unchanged = await parseText(initial.join('\n'), true, true);
-	check(unchanged.accepted && unchanged.writes.length === 1 &&
-		sameList(unchanged.writes[0].value, initial) && sameList(unchanged.stored, initial),
-		`LuCI ${luciBranch} unrelated form saves preserve existing duplicate URLs`);
-
-	const pending = [ sourceB, sourceA, sourceB ];
-	const pendingResult = await parseText(pending.join('\n'), true, true);
-	check(pendingResult.accepted && pendingResult.writes.length === 1 &&
-		sameList(pendingResult.writes[0].value, pending) && sameList(pendingResult.stored, pending),
-		`LuCI ${luciBranch} directly saves pending duplicate URL occurrences`);
-
-	const reordered = [ sourceB, sourceB, sourceA ];
-	const reorderedResult = await parseText(reordered.join('\n'), true, true);
-	check(reorderedResult.accepted && reorderedResult.writes.length === 1 &&
-		sameList(reorderedResult.writes[0].value, reordered) &&
-		sameList(reorderedResult.stored, reordered),
-		`LuCI ${luciBranch} preserves an explicit duplicate URL reorder`);
-
-	const acceptedEight = await parseText(eight.join('\n'), true, true);
-	check(acceptedEight.accepted && acceptedEight.writes.length === 1 &&
-		sameList(acceptedEight.writes[0].value, eight) && sameList(acceptedEight.stored, eight),
-		`LuCI ${luciBranch} atomically accepts eight ordered URL lines`);
-
-	const rejectsWithoutWriting = async (text, description) => {
-		const result = await parseText(text, true, true);
-		check(!result.accepted && result.writes.length === 0 && sameList(result.stored, eight),
-			`LuCI ${luciBranch} ${description}`);
-	};
-	await rejectsWithoutWriting(eight.concat('https://ninth.example/sub').join('\n'),
-		'atomically rejects a ninth URL line');
-	await rejectsWithoutWriting(sourceA + '\n\n' + sourceB,
-		'atomically rejects an empty URL line');
-	await rejectsWithoutWriting(sourceA + '\n',
-		'atomically rejects a trailing empty URL line');
-	await rejectsWithoutWriting(sourceA + '\u0001',
-		'atomically rejects URL control characters');
-	await rejectsWithoutWriting('http://?query',
-		'atomically rejects an empty URL authority');
-	await rejectsWithoutWriting('https:///path',
-		'atomically rejects a URL without a hostname');
-	await rejectsWithoutWriting('http://:80/sub',
-		'atomically rejects an empty hostname with a port');
-	await rejectsWithoutWriting('http://user@:80/sub',
-		'atomically rejects userinfo followed by an empty hostname');
-	await rejectsWithoutWriting('https://exa%6Dple.com/sub',
-		'atomically rejects an ASCII percent escape in the hostname');
-	await rejectsWithoutWriting('https://user[bad]@provider.example/sub',
-		'atomically rejects invalid userinfo characters');
-	await rejectsWithoutWriting('https://provider|invalid.example/sub',
-		'atomically rejects invalid hostname characters');
-	await rejectsWithoutWriting('https://[x:y]/sub',
-		'atomically rejects non-hexadecimal bracketed host groups');
-	await rejectsWithoutWriting('https://[::::]/sub',
-		'atomically rejects malformed IPv6 compression');
-	await rejectsWithoutWriting('https://[2001::db8::1]/sub',
-		'atomically rejects repeated IPv6 compression');
-	await rejectsWithoutWriting('https://provider.example/raw space',
-		'atomically rejects raw URL spaces');
-	await rejectsWithoutWriting('https://provider.example/sub ',
-		'atomically rejects trailing URL spaces');
-	await rejectsWithoutWriting('https://provider.example/%zz',
-		'atomically rejects malformed percent escapes');
-	await rejectsWithoutWriting('https://provider.example/sub\u007f',
-		'atomically rejects URL DEL bytes');
-	await rejectsWithoutWriting('ftp://provider.example/sub',
-		'atomically rejects a non-HTTP(S) URL');
-
-	const rejectedEnabledEmpty = await parseText('', true, false);
-	check(!rejectedEnabledEmpty.accepted && rejectedEnabledEmpty.writes.length === 0 &&
-		sameList(rejectedEnabledEmpty.stored, eight),
-		`LuCI ${luciBranch} uses the live enabled field to reject zero URLs`);
-
-	const acceptedDisabledEmpty = await parseText('', false, true);
-	check(acceptedDisabledEmpty.accepted && acceptedDisabledEmpty.writes.length === 1 &&
-		acceptedDisabledEmpty.writes[0].value === null && acceptedDisabledEmpty.stored === undefined,
-		`LuCI ${luciBranch} uses the live disabled field to unset zero URLs`);
-
-	const validBoundaryURLs = [
-		'HTTPS://provider.example/sub',
-		'https://user:pass@provider.example/sub',
-		'https://[2001:db8::1]/sub',
-		'https://[::ffff:192.0.2.1]/sub',
-		'https://[fe80::1%25eth0]/sub',
-		'https://provider.example:0/sub',
-		'https://provider.example:65536/sub',
-		'https://provider.example/sub#fragment',
-		'https://provider.example/sub?opaque=%zz',
-		'https://provider.example/escaped%20space'
-	];
-	for (const validURL of validBoundaryURLs) {
-		const accepted = await parseText(validURL, true, true);
-		check(accepted.accepted && accepted.writes.length === 1 &&
-			sameList(accepted.writes[0].value, [ validURL ]) &&
-			sameList(accepted.stored, [ validURL ]),
-			`LuCI ${luciBranch} accepts and preserves backend-valid URL ${validURL}`);
-	}
-}
-
 async function exerciseOverviewContracts() {
-	const runtime = installGlobals({ status: {}, list_templates: { templates: [] } });
-	uci._data['liquid_formula.main.enabled'] = '1';
+	installGlobals({ status: {}, list_templates: { templates: [] } });
 	uci._data['fakehttp.main.fwmark'] = '0x2200';
 	uci._data['fakehttp.main.fwmask'] = '0x2f00';
 	uci._data['fakesip.main.fwmark'] = '131072';
@@ -920,16 +618,52 @@ async function exerciseOverviewContracts() {
 	const option = (name) => options.find((candidate) => candidate.option === name);
 	const output = option('output_config');
 	const templateBase = option('template_base_url');
+	const subscription = option('subscription_url');
 	const userAgent = option('user_agent');
-	const subscriptionTimeout = option('subscription_timeout');
-	const refreshInterval = option('refresh_interval');
 	const fakehttpBypass = option('momo_bypass_fakehttp');
 	const fakesipBypass = option('momo_bypass_fakesip');
 	const check = (condition, description) => condition ? ok(description) : fail(description);
-	check(userAgent && userAgent.type._formTypeName === 'Value' &&
-		subscriptionTimeout && subscriptionTimeout.type._formTypeName === 'Value' &&
-		refreshInterval && refreshInterval.type._formTypeName === 'Value',
-		'overview keeps User-Agent, timeout, and refresh interval as one global scalar each');
+
+	const invalidSubscriptionURLs = [
+		'ftp://provider.example/sub', 'http://?query', 'https:///path',
+		'http://:80/sub', 'http://user@:80/sub', 'https://exa%6Dple.com/sub',
+		'https://user[bad]@provider.example/sub', 'https://provider|invalid.example/sub',
+		'https://[x:y]/sub', 'https://[::::]/sub', 'https://[2001::db8::1]/sub',
+		'https://provider.example/raw space', 'https://provider.example/sub ',
+		'https://provider.example/%zz', 'https://provider.example/sub\u007f'
+	];
+	for (const invalidURL of invalidSubscriptionURLs)
+		check(subscription && subscription.validate('main', invalidURL) !== true,
+			`overview rejects invalid scalar subscription URL ${invalidURL}`);
+
+	const validSubscriptionURLs = [
+		'HTTPS://provider.example/sub', 'https://user:pass@provider.example/sub',
+		'https://[2001:db8::1]/sub', 'https://[::ffff:192.0.2.1]/sub',
+		'https://[fe80::1%25eth0]/sub', 'https://provider.example:0/sub',
+		'https://provider.example:65536/sub', 'https://provider.example/sub#fragment',
+		'https://provider.example/sub?opaque=%zz', 'https://provider.example/escaped%20space'
+	];
+	for (const validURL of validSubscriptionURLs)
+		check(subscription && subscription.validate('main', validURL) === true,
+			`overview accepts backend-valid scalar subscription URL ${validURL}`);
+	uci._data['liquid_formula.main.enabled'] = '0';
+	check(subscription && subscription.validate('main', '') === true,
+		'overview allows an empty scalar subscription URL while disabled');
+	uci._data['liquid_formula.main.enabled'] = '1';
+	check(subscription && subscription.validate('main', '') !== true,
+		'overview requires a scalar subscription URL while enabled');
+
+	check(userAgent && userAgent.type === form.Value,
+		'user-agent remains a customisable Value control');
+	check(userAgent && userAgent.default === 'v2rayN/7.24.4',
+		'user-agent fresh default is current v2rayN');
+	check(userAgent && JSON.stringify(userAgent.keylist) === JSON.stringify([
+		'v2rayN/7.24.4', 'v2rayNG/2.2.6', 'sing-box 1.13.15',
+		'SFI/1.13.15 (sing-box 1.13.15)', 'SFA/1.13.15 (sing-box 1.13.15)',
+		'SFM/1.13.15 (sing-box 1.13.15)', 'Karing/1.2.23.2605'
+	]), 'user-agent exposes only the seven maintained presets in order');
+	check(userAgent && userAgent.validate('main', 'ProviderCustom/99.1') === true,
+		'user-agent accepts a provider-specific custom value');
 
 	check(output && output.validate('main', '/etc/momo/profiles/router.json') === true,
 		'overview accepts an allowed JSON output path');
@@ -945,55 +679,17 @@ async function exerciseOverviewContracts() {
 		'overview rejects an oversized loopback port');
 	check(templateBase && templateBase.validate('main', 'http://localhost:080/templates') !== true,
 		'overview rejects a non-canonical loopback port');
-	check(mod.actionWaitSeconds('refresh') === 630,
-		'refresh wait covers refresh, lock acquisition, and synchronization');
-	check(mod.actionWaitSeconds('check') === 1200 && mod.actionWaitSeconds('update') === 1200,
-		'check and update cover startup, refresh, lock acquisition, synchronization, and fetch');
+	check(mod.actionWaitSeconds('refresh') === 150,
+		'refresh wait matches one default request budget plus RPC overhead');
+	check(mod.actionWaitSeconds('check') === 540 && mod.actionWaitSeconds('update') === 540,
+		'check and update wait for startup, refresh, and fetch budgets');
 	mod._enabledTemplateCount = 10;
 	uci._data['liquid_formula.main.subscription_timeout'] = '600';
-	check(mod.actionWaitSeconds('update') === 33900,
-		'frontend wait includes every enabled template without the obsolete cap');
+	check(mod.actionWaitSeconds('update') === 11160,
+		'frontend wait reaches the same capped maximum as the RPC watchdog');
 	uci._data['liquid_formula.main.subscription_timeout'] = 'invalid';
-	let invalidBudgetRejected = false;
-	try {
-		mod.actionWaitSeconds('check');
-	} catch (error) {
-		invalidBudgetRejected = true;
-	}
-	check(invalidBudgetRejected,
-		'invalid timeout data prevents UI dispatch instead of using a fallback budget');
-
-	const budgetCases = fs.readFileSync(BUDGET_CASES, 'utf8').split(/\r?\n/)
-		.filter((line) => line && line[0] !== '#')
-		.map((line) => {
-			const fields = line.split('\t');
-			return {
-				name: fields[0],
-				sources: Number(fields[1]),
-				timeout: fields[2],
-				enabled: Number(fields[3]),
-				refresh: fields[5],
-				apply: fields[6]
-			};
-		});
-	for (const budgetCase of budgetCases) {
-		uci._data['liquid_formula.main.subscription_url'] =
-			Array.from({ length: budgetCase.sources },
-				() => 'https://duplicate.example/sub');
-		uci._data['liquid_formula.main.subscription_timeout'] = budgetCase.timeout;
-		mod._enabledTemplateCount = budgetCase.enabled;
-		for (const action of [ 'refresh', 'update' ]) {
-			const expected = action === 'refresh' ? budgetCase.refresh : budgetCase.apply;
-			let actual = 'invalid';
-			try {
-				actual = String(mod.actionWaitSeconds(action));
-			} catch (error) {
-				actual = 'invalid';
-			}
-			check(actual === expected,
-				`frontend budget fixture ${budgetCase.name}/${action} matches ${expected}`);
-		}
-	}
+	check(mod.actionWaitSeconds('check') === 11160,
+		'invalid timeout data fails safe to the RPC fallback budget');
 
 	check(fakehttpBypass && fakehttpBypass.title.includes('0x2200/0x2f00'),
 		'FakeHTTP bypass label uses its live UCI mark and mask');
@@ -1031,47 +727,69 @@ function mapRenderState() {
 	});
 }
 
+function deferredResponse() {
+	let resolve;
+	const promise = new Promise((done) => { resolve = done; });
+	return { promise, resolve };
+}
+
 async function exerciseTemplateRefreshContracts() {
 	const initial = [
 		{ id: 'alpha', enabled: true, name: 'Alpha', file: 'alpha.json', size: 1, mtime: '1' },
 		{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' },
 		{ id: 'retired', enabled: false, name: 'Retired', file: 'retired.json', size: 3, mtime: '3' }
 	];
-	const responses = [
+	const afterCreate = [
+		{ id: 'alpha', enabled: true, name: 'Alpha', file: 'alpha.json', size: 1, mtime: '1' },
+		{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' },
+		{ id: 'gamma', enabled: true, name: 'Gamma', file: 'gamma.json', size: 4, mtime: '4' },
+		{ id: 'retired', enabled: false, name: 'Retired', file: 'retired.json', size: 3, mtime: '3' }
+	];
+	const afterEdit = [
+		{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
+		{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' },
+		{ id: 'gamma', enabled: true, name: 'Gamma', file: 'gamma.json', size: 4, mtime: '4' }
+	];
+	const afterDelete = [
+		{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
+		{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' }
+	];
+	const afterDisable = [
+		{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
+		{ id: 'beta', enabled: false, name: 'Beta', file: 'beta.json', size: 2, mtime: '6' }
+	];
+	const staleOlder = deferredResponse();
+	const staleNewer = deferredResponse();
+	const listResponses = [
 		{ templates: initial },
-		{ templates: [
-			{ id: 'alpha', enabled: true, name: 'Alpha', file: 'alpha.json', size: 1, mtime: '1' },
-			{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' },
-			{ id: 'gamma', enabled: true, name: 'Gamma', file: 'gamma.json', size: 4, mtime: '4' },
-			{ id: 'retired', enabled: false, name: 'Retired', file: 'retired.json', size: 3, mtime: '3' }
-		] },
-		{ templates: [
-			{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
-			{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' },
-			{ id: 'gamma', enabled: true, name: 'Gamma', file: 'gamma.json', size: 4, mtime: '4' }
-		] },
-		{ templates: [
-			{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
-			{ id: 'beta', enabled: true, name: 'Beta', file: 'beta.json', size: 2, mtime: '2' }
-		] },
-		{ templates: [
-			{ id: 'alpha', enabled: true, name: 'Alpha renamed', file: 'alpha.json', size: 1, mtime: '5' },
-			{ id: 'beta', enabled: false, name: 'Beta', file: 'beta.json', size: 2, mtime: '6' }
-		] },
-		new Error('template list transport failed')
+		{ templates: afterCreate },
+		{ templates: afterEdit },
+		{ templates: afterDelete },
+		{ templates: afterDisable },
+		new Error('template list transport failed'),
+		staleOlder.promise,
+		staleNewer.promise
 	];
 	let listCalls = 0;
 	const writeCalls = [];
+	const deleteCalls = [];
 	const runtime = installGlobals({
 		status: {},
 		list_templates() {
 			listCalls++;
-			const response = responses.shift();
+			const response = listResponses.shift();
 			return response instanceof Error ? Promise.reject(response) : response;
+		},
+		read_template(id, file) {
+			return { ok: true, id, file, content: '{"outbounds":[]}' };
 		},
 		write_template(id, name, file, noNode, enabled, content) {
 			writeCalls.push({ id, name, file, noNode, enabled, content });
-			return { ok: true, phase: 'complete', id: id, file: file };
+			return { ok: true, phase: 'complete', id, file };
+		},
+		delete_template(id) {
+			deleteCalls.push(id);
+			return { ok: true, phase: 'complete', id };
 		}
 	});
 	const check = (condition, description) => condition ? ok(description) : fail(description);
@@ -1090,7 +808,7 @@ async function exerciseTemplateRefreshContracts() {
 	}
 
 	const map = renderedMaps.find((candidate) => candidate.config === 'liquid_formula');
-	const defaultTemplate = map.sections.flatMap((section) => section.options)
+	const defaultTemplate = map && map.sections.flatMap((section) => section.options)
 		.find((option) => option.option === 'default_template');
 	const select = runtime.listValues.default_template;
 	const port = runtime.formInputs.port;
@@ -1098,108 +816,132 @@ async function exerciseTemplateRefreshContracts() {
 		listChoices(select).map((choice) => choice.value).join(',') === 'alpha,beta',
 		'the rendered default-template ListValue excludes disabled choices initially');
 
-	// Make a genuine rendered Overview field dirty. Refreshing templates must not
-	// replace this live control or its UCI delta.
+	// Exercise a genuine dirty Overview control. Every template operation below
+	// must update only the table and ListValue, without parsing or replacing it.
 	port.value = '9816';
 	port.dispatchEvent({ type: 'input' });
-	const dirtyBeforeRefresh = JSON.stringify(uci._changes);
-	const formEventsBeforeRefresh = runtime.formValueChanges.length;
-	const mapsBeforeRefresh = mapRenderState();
+	const dirtyBeforeCreate = JSON.stringify(uci._changes);
+	const inputEventsBeforeCreate = runtime.formValueChanges.length;
+	const mapsBeforeCreate = mapRenderState();
 
 	mod.uploadTemplate({ target: { files: [ { name: 'gamma.json', content: '{}' } ] } });
 	await mod.saveTemplate();
 	check(writeCalls.length === 1 && writeCalls[0].id === 'gamma' && writeCalls[0].enabled === true &&
 		listCalls === 2 && templateRowIds().join(',') === 'alpha,beta,gamma,retired' &&
 		listChoices(select).map((choice) => choice.value).join(',') === 'alpha,beta,gamma',
-		'a successful uploaded enabled template save immediately adds it to the table and dropdown');
+		'creating an enabled template immediately refreshes the table and default dropdown');
 	check(select.value === 'alpha' && port.value === '9816' &&
 		uci._data['liquid_formula.main.port'] === '9816' && runtime.listValueChanges.length === 0 &&
-		JSON.stringify(uci._changes) === dirtyBeforeRefresh &&
-		runtime.formValueChanges.length === formEventsBeforeRefresh && mapRenderState() === mapsBeforeRefresh,
-		'uploading a template preserves the selected value and rendered dirty input without a full render or UCI changes');
+		JSON.stringify(uci._changes) === dirtyBeforeCreate &&
+		runtime.formValueChanges.length === inputEventsBeforeCreate && mapRenderState() === mapsBeforeCreate,
+		'creating a template preserves the selected default and unrelated dirty input without a full render');
 
-	const renameDelta = JSON.stringify(uci._changes);
-	const renameEvents = runtime.formValueChanges.length;
-	const renameListEvents = runtime.listValueChanges.length;
-	const renameMaps = mapRenderState();
-	await mod.reloadTemplateList();
-	check(listChoices(select).some((choice) => choice.value === 'alpha' && choice.label === 'Alpha renamed') &&
+	await mod.loadTemplate(initial[0]);
+	document.getElementById('sbsc_tpl_name').value = 'Alpha renamed';
+	document.getElementById('sbsc_tpl_content').value = '{"edited":true}';
+	const dirtyBeforeEdit = JSON.stringify(uci._changes);
+	const listEventsBeforeEdit = runtime.listValueChanges.length;
+	const inputEventsBeforeEdit = runtime.formValueChanges.length;
+	const mapsBeforeEdit = mapRenderState();
+	await mod.saveTemplate();
+	check(writeCalls.length === 2 && writeCalls[1].id === 'alpha' &&
+		writeCalls[1].name === 'Alpha renamed' &&
+		listChoices(select).some((choice) => choice.value === 'alpha' && choice.label === 'Alpha renamed') &&
 		templateRowIds().join(',') === 'alpha,beta,gamma',
-		'a renamed template is immediately reflected in both rendered structures');
-	check(port.value === '9816' && uci._data['liquid_formula.main.port'] === '9816' &&
-		JSON.stringify(uci._changes) === renameDelta && runtime.formValueChanges.length === renameEvents &&
-		runtime.listValueChanges.length === renameListEvents &&
-		mapRenderState() === renameMaps,
-		'renaming a template preserves the live dirty input without a synthetic delta or full render');
+		'editing a template immediately refreshes its table row and default-dropdown label');
+	check(port.value === '9816' && JSON.stringify(uci._changes) === dirtyBeforeEdit &&
+		runtime.listValueChanges.length === listEventsBeforeEdit &&
+		runtime.formValueChanges.length === inputEventsBeforeEdit && mapRenderState() === mapsBeforeEdit,
+		'editing a template preserves dirty form state without synthetic events or a full render');
 
-	const deleteDelta = JSON.stringify(uci._changes);
-	const deleteEvents = runtime.formValueChanges.length;
-	const deleteListEvents = runtime.listValueChanges.length;
-	const deleteMaps = mapRenderState();
-	await mod.reloadTemplateList();
-	check(!listChoices(select).some((choice) => choice.value === 'gamma') &&
+	const dirtyBeforeDelete = JSON.stringify(uci._changes);
+	const listEventsBeforeDelete = runtime.listValueChanges.length;
+	const inputEventsBeforeDelete = runtime.formValueChanges.length;
+	const mapsBeforeDelete = mapRenderState();
+	await mod.deleteTemplate('gamma');
+	check(deleteCalls.join(',') === 'gamma' &&
+		!listChoices(select).some((choice) => choice.value === 'gamma') &&
 		!templateRowIds().includes('gamma'),
-		'a deleted template is immediately removed from both rendered structures');
-	check(port.value === '9816' && uci._data['liquid_formula.main.port'] === '9816' &&
-		JSON.stringify(uci._changes) === deleteDelta && runtime.formValueChanges.length === deleteEvents &&
-		runtime.listValueChanges.length === deleteListEvents &&
-		mapRenderState() === deleteMaps,
-		'deleting a template preserves the live dirty input without a synthetic delta or replacement map');
+		'deleting a template immediately removes it from the table and default dropdown');
+	check(port.value === '9816' && JSON.stringify(uci._changes) === dirtyBeforeDelete &&
+		runtime.listValueChanges.length === listEventsBeforeDelete &&
+		runtime.formValueChanges.length === inputEventsBeforeDelete && mapRenderState() === mapsBeforeDelete,
+		'deleting a template preserves dirty form state without synthetic events or a replacement map');
 
 	select.value = 'beta';
 	select.dispatchEvent({ type: 'change' });
+	await mod.loadTemplate(afterDelete[1]);
+	document.getElementById('sbsc_tpl_enabled').checked = false;
 	const dirtyUnavailableSelection = JSON.stringify(uci._changes);
-	const unavailableEvents = runtime.formValueChanges.length;
+	const unavailableInputEvents = runtime.formValueChanges.length;
 	const unavailableListEvents = runtime.listValueChanges.length;
 	const unavailableMaps = mapRenderState();
 	const unavailableValidationCalls = defaultTemplate.validationCalls.length;
-	await mod.reloadTemplateList();
+	await mod.saveTemplate();
 	const betaChoice = listChoices(select).find((choice) => choice.value === 'beta');
-	const unavailableParseRejected = await defaultTemplate.parse('main').then(
-		() => false, () => true);
-	check(select.value === 'beta' && betaChoice && betaChoice.disabled && betaChoice.hidden &&
+	const hasDefaultValidation = defaultTemplate && typeof defaultTemplate.validate === 'function';
+	const unavailableParseRejected = await defaultTemplate.parse('main').then(() => false, () => true);
+	check(writeCalls.length === 3 && writeCalls[2].id === 'beta' && writeCalls[2].enabled === false &&
+		select.value === 'beta' && betaChoice && betaChoice.disabled && betaChoice.hidden &&
 		listChoices(select).filter((choice) => !choice.disabled).map((choice) => choice.value).join(',') === 'alpha' &&
 		templateRowIds().join(',') === 'alpha,beta' && port.value === '9816' &&
-		uci._data['liquid_formula.main.port'] === '9816' &&
 		JSON.stringify(uci._changes) === dirtyUnavailableSelection &&
-		runtime.formValueChanges.length === unavailableEvents &&
+		runtime.formValueChanges.length === unavailableInputEvents &&
 		runtime.listValueChanges.length === unavailableListEvents && mapRenderState() === unavailableMaps,
-		'disabling an unsaved selection preserves it only as a hidden unavailable choice while updating the table');
-	check(defaultTemplate && typeof defaultTemplate.validate === 'function' &&
-		defaultTemplate.validate('main', 'beta') !== true &&
+		'disabling a dirty default preserves it only as a hidden unavailable choice while refreshing the table');
+	check(hasDefaultValidation && defaultTemplate.validate('main', 'beta') !== true &&
 		defaultTemplate.validate('main', 'alpha') === true &&
 		defaultTemplate.keylist.join(',') === 'alpha' &&
 		defaultTemplate.vallist.join(',') === 'Alpha renamed' &&
 		defaultTemplate.validationCalls.length === unavailableValidationCalls + 1 &&
 		defaultTemplate.validationCalls[defaultTemplate.validationCalls.length - 1] === 'main' &&
-		defaultTemplate.validState !== true &&
-		unavailableParseRejected &&
+		defaultTemplate.validState !== true && unavailableParseRejected &&
 		JSON.stringify(uci._changes) === dirtyUnavailableSelection,
-		'an unavailable default-template selection is revalidated while the ListValue model keeps enabled choices only');
+		'an invalid refreshed default is revalidated while the ListValue model contains enabled templates only');
 
-	const rowsBeforeFailedRefresh = templateRowIds().join(',');
-	const choicesBeforeFailedRefresh = JSON.stringify(listChoices(select));
-	const selectedBeforeFailedRefresh = select.value;
-	const listChangesBeforeFailedRefresh = runtime.listValueChanges.length;
-	const formEventsBeforeFailedRefresh = runtime.formValueChanges.length;
-	const dirtyBeforeFailedRefresh = JSON.stringify(uci._changes);
-	const mapsBeforeFailedRefresh = mapRenderState();
+	const rowsBeforeRestore = templateRowIds().join(',');
+	const choicesBeforeRestore = JSON.stringify(listChoices(select));
+	const selectionBeforeRestore = select.value;
+	const listEventsBeforeRestore = runtime.listValueChanges.length;
+	const inputEventsBeforeRestore = runtime.formValueChanges.length;
+	const dirtyBeforeRestore = JSON.stringify(uci._changes);
+	const mapsBeforeRestore = mapRenderState();
 	document.getElementById('sbsc_tpl_id').value = 'alpha';
 	document.getElementById('sbsc_tpl_name').value = 'Alpha renamed';
 	document.getElementById('sbsc_tpl_file').value = 'alpha.json';
 	document.getElementById('sbsc_tpl_content').value = '{}';
 	await mod.saveTemplate();
 	const saveStatus = document.getElementById('sbsc_tpl_save_status');
-	check(templateRowIds().join(',') === rowsBeforeFailedRefresh &&
-		JSON.stringify(listChoices(select)) === choicesBeforeFailedRefresh &&
-		select.value === selectedBeforeFailedRefresh &&
-		runtime.listValueChanges.length === listChangesBeforeFailedRefresh &&
-		runtime.formValueChanges.length === formEventsBeforeFailedRefresh &&
-		port.value === '9816' && uci._data['liquid_formula.main.port'] === '9816' &&
-		JSON.stringify(uci._changes) === dirtyBeforeFailedRefresh &&
-		mapRenderState() === mapsBeforeFailedRefresh &&
+	check(templateRowIds().join(',') === rowsBeforeRestore &&
+		JSON.stringify(listChoices(select)) === choicesBeforeRestore &&
+		select.value === selectionBeforeRestore &&
+		runtime.listValueChanges.length === listEventsBeforeRestore &&
+		runtime.formValueChanges.length === inputEventsBeforeRestore && port.value === '9816' &&
+		JSON.stringify(uci._changes) === dirtyBeforeRestore && mapRenderState() === mapsBeforeRestore &&
 		saveStatus && /saved.*refresh/i.test(saveStatus.textContent) && saveStatus.style.color === '#b00',
-		'a completed save with a rejected refresh leaves both structures untouched and reports a distinct refresh warning');
+		'a failed post-save refresh restores both rendered structures and reports a distinct refresh warning');
+
+	const olderRequest = mod.reloadTemplateList();
+	const newerRequest = mod.reloadTemplateList();
+	staleNewer.resolve({ templates: [
+		{ id: 'alpha', enabled: true, name: 'Alpha latest', file: 'alpha.json', size: 1, mtime: '8' },
+		{ id: 'delta', enabled: true, name: 'Delta', file: 'delta.json', size: 5, mtime: '8' }
+	] });
+	await newerRequest;
+	check(templateRowIds().join(',') === 'alpha,delta' &&
+		listChoices(select).filter((choice) => !choice.disabled).map((choice) => choice.value).join(',') === 'alpha,delta',
+		'the newest template response commits while an older request remains in flight');
+	staleOlder.resolve({ templates: [
+		{ id: 'alpha', enabled: true, name: 'Alpha stale', file: 'alpha.json', size: 1, mtime: '7' },
+		{ id: 'beta', enabled: true, name: 'Beta stale', file: 'beta.json', size: 2, mtime: '7' }
+	] });
+	await olderRequest;
+	check(templateRowIds().join(',') === 'alpha,delta' &&
+		listChoices(select).filter((choice) => !choice.disabled).map((choice) => choice.value).join(',') === 'alpha,delta' &&
+		listChoices(select).some((choice) => choice.value === 'alpha' && choice.label === 'Alpha latest') &&
+		port.value === '9816' && JSON.stringify(uci._changes) === dirtyBeforeRestore &&
+		mapRenderState() === mapsBeforeRestore,
+		'a stale template response cannot overwrite the latest atomic table and dropdown snapshot');
 }
 
 async function exerciseOverviewRenderingSafety() {
@@ -1213,25 +955,7 @@ async function exerciseOverviewRenderingSafety() {
 		action_state: 'running',
 		action: payload,
 		config_digest: 'new-digest',
-		config_error: payload,
-		subscription: {
-			schema: 1,
-			overall_state: 'degraded',
-			config_match: true,
-			active_generation: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-			total_sources: 2,
-			fresh_count: 1,
-			fallback_indices: [ 2 ],
-			sources: [
-			{ index: 1, result: 'fresh', fetch_code: 'ok', format: 'singbox-json',
-			  accepted: 4, skipped: 0, warnings: [] },
-			{ index: 2, result: 'fallback', fetch_code: 'http_status', format: 'clash-yaml',
-			  accepted: 3, skipped: 1, warnings: [ {
-				  code: 'invalid_field', node_index: 7, type: 'vmess', field: 'port'
-			  } ] }
-			],
-			last_attempt: null
-		}
+		config_error: payload
 	};
 	installGlobals({
 		status,
@@ -1268,75 +992,6 @@ async function exerciseOverviewRenderingSafety() {
 		node.tagName === 'EM' && node.textContent.includes(payload))[0];
 	check(isLiteralText(actionNode, payload),
 		'the background action name renders as literal text');
-	const subscriptionRoot = findNodes(statusRoot, (node) =>
-		node.attributes && node.attributes.id === 'sbf_subscription_status')[0];
-	const subscriptionTable = subscriptionRoot && findNodes(subscriptionRoot,
-		(node) => node.tagName === 'TABLE')[0];
-	const subscriptionRows = subscriptionTable && findNodes(subscriptionTable,
-		(node) => node.tagName === 'TR' && node.classList.contains('cbi-section-table-row'));
-	const degradedWarning = subscriptionRoot && findNodes(subscriptionRoot,
-		(node) => node.classList && node.classList.contains('alert-message') &&
-			node.classList.contains('warning'))[0];
-	check(subscriptionRoot && degradedWarning &&
-		/degraded|cached/i.test(degradedWarning.textContent) &&
-		degradedWarning.textContent.includes('2'),
-		'degraded subscription state renders as a source-indexed warning');
-	check(subscriptionTable && hasClasses(subscriptionTable, [ 'table', 'cbi-section-table' ]) &&
-		subscriptionRows.length === 2 &&
-		subscriptionRows.every((row) => hasClasses(row, [ 'tr', 'cbi-section-table-row' ])) &&
-		subscriptionRoot.textContent.includes('clash-yaml') &&
-		subscriptionRoot.textContent.includes('3') && subscriptionRoot.textContent.includes('1'),
-		'subscription status renders responsive per-source format and count rows');
-	check(subscriptionRoot && subscriptionRoot.textContent.includes('invalid_field') &&
-		subscriptionRoot.textContent.includes('vmess/port') &&
-		findNodes(subscriptionRoot, (node) =>
-			node.textContent.includes('invalid_field')).every((node) =>
-			!String(node.innerHTML || '').includes('invalid_field')),
-		'subscription diagnostics render only as literal text nodes');
-
-	if (typeof mod.renderSubscriptionStatus !== 'function') {
-		fail('complete subscription failure renders preservation details');
-		fail('subscription status rejects unlisted diagnostic values and private fields');
-	} else {
-		const failedRoot = mod.renderSubscriptionStatus({
-			overall_state: 'failed', config_match: true,
-			active_generation: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-			total_sources: 2, fresh_count: 1, fallback_indices: [ 2 ], sources: [],
-			last_attempt: {
-				state: 'failed', total_sources: 2, failure_stage: 'source_fetch',
-				code: 'source_unavailable', fetch_code: 'http_status',
-				source_index: 2, preserved: true
-			}
-		});
-		check(failedRoot && /failed/i.test(failedRoot.textContent) &&
-			/source_fetch/.test(failedRoot.textContent) &&
-			failedRoot.textContent.includes('2') && /preserv/i.test(failedRoot.textContent),
-			'complete subscription failure renders preservation details');
-
-		const sensitive = 'https://private.example/sub?token=raw-secret';
-		const privateRoot = mod.renderSubscriptionStatus({
-			overall_state: 'failed', config_match: true,
-			active_generation: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-			total_sources: 1, fresh_count: 0, fallback_indices: [],
-			url: sensitive, config_digest: sensitive, raw_error: sensitive,
-			sources: [ {
-				index: 1, result: sensitive, fetch_code: sensitive,
-				format: sensitive, accepted: 0, skipped: 1, warnings: [ {
-					code: sensitive, node_index: 1, type: sensitive, field: sensitive
-				} ],
-				node_name: sensitive, object_sha256: sensitive
-			} ],
-			last_attempt: {
-				state: 'failed', total_sources: 1,
-				failure_stage: sensitive, code: sensitive,
-				fetch_code: sensitive, source_index: 1, preserved: true,
-				raw_error: sensitive
-			}
-		});
-		check(privateRoot && !privateRoot.textContent.includes(sensitive) &&
-			!privateRoot.textContent.includes('raw-secret'),
-			'subscription status rejects unlisted diagnostic values and private fields');
-	}
 
 	const template = {
 		id: payload,
@@ -1660,12 +1315,12 @@ async function exerciseDpiWanModeContracts() {
 			`${item.service} explicitly retains the hidden manual device list`);
 
 		if (mode) {
-			fixture.runtime.listValues.interface_mode.value = 'auto';
+			uci.set(item.service, 'main', 'interface_mode', 'auto');
 			await fixture.map.parse();
 			check(JSON.stringify(uci.get(item.service, 'main', 'interface')) ===
 			      JSON.stringify(fixture.manual),
 				`${item.service} stock map.parse preserves manual devices while auto mode hides them`);
-			fixture.runtime.listValues.interface_mode.value = 'selected';
+			uci.set(item.service, 'main', 'interface_mode', 'selected');
 			await fixture.map.parse();
 			check(JSON.stringify(uci.get(item.service, 'main', 'interface')) ===
 			      JSON.stringify(fixture.manual),
@@ -1706,6 +1361,7 @@ const RPC_SHAPES = [
 			live: { tcp_fastopen: '3', default_qdisc: 'cake',
 			        congestion_control: 'bbr', tcp_max_syn_backlog: '512' },
 			available_congestion_control: 'reno cubic bbr',
+			openwrt_release: '25.12.0',
 			cake_module: true, bbr_module: true, sysctl_conf_conflict: false,
 			irqbalance: { installed: true, enabled: '1', running: true }
 		},
@@ -1722,6 +1378,61 @@ const RPC_SHAPES = [
 		status: {}, list_templates: { templates: [] }
 	}]
 ];
+
+async function exerciseTuningChoiceContracts() {
+	const releases = [
+		['24.10 hides cake_mq', '24.10.4', false],
+		['25.12 shows cake_mq', '25.12.0', true],
+		['later releases show cake_mq', '26.1.0', true],
+		['unknown releases hide cake_mq', 'snapshot', false],
+		['missing releases hide cake_mq', '', false]
+	];
+
+	for (const [description, release, expectCakeMq] of releases) {
+		installGlobals({
+			tuning_status: {
+				live: {}, available_congestion_control: 'reno cubic bbr',
+				openwrt_release: release,
+				cake_module: true, bbr_module: true, sysctl_conf_conflict: false,
+				irqbalance: { installed: true, enabled: '0', running: false }
+			}
+		});
+
+		let mod;
+		try {
+			mod = new Function(fs.readFileSync(path.join(VIEW_DIR, 'customlogo.js'), 'utf8'))();
+			await mod.render(await mod.load());
+		} catch (error) {
+			fail(`tuning choices render for ${description}`, error);
+			continue;
+		}
+
+		const map = renderedMaps.find((candidate) => candidate.config === 'customlogo');
+		const options = map ? map.sections.flatMap((section) => section.options) : [];
+		const option = (name) => options.find((candidate) => candidate.option === name);
+		const check = (condition, message) => condition ? ok(message) : fail(message);
+		const qdisc = option('tuning_default_qdisc');
+		const congestion = option('tuning_congestion_control');
+		const backlog = option('tuning_backlog');
+
+		check(qdisc && qdisc.type === form.ListValue,
+			`qdisc is a ListValue (${description})`);
+		check(congestion && congestion.type === form.ListValue,
+			`congestion control is a ListValue (${description})`);
+		check(backlog && backlog.type === form.ListValue,
+			`SYN backlog is a ListValue (${description})`);
+		check(qdisc && JSON.stringify(qdisc.keylist) === JSON.stringify(
+			expectCakeMq ? ['cake', 'cake_mq', 'fq_codel'] : ['cake', 'fq_codel']),
+			`qdisc choices obey the release gate (${description})`);
+		check(congestion && JSON.stringify(congestion.keylist) === JSON.stringify(['bbr', 'cubic', 'reno']),
+			`congestion choices are fixed (${description})`);
+		check(backlog && JSON.stringify(backlog.keylist) === JSON.stringify(['128', '512', '1024', '2048']),
+			`backlog choices are fixed (${description})`);
+		check(qdisc && qdisc.default === 'cake', `qdisc default is cake (${description})`);
+		check(congestion && congestion.default === 'bbr', `congestion default is bbr (${description})`);
+		check(backlog && backlog.default === '512', `backlog default is 512 (${description})`);
+	}
+}
 
 async function exerciseView(file, shapeName, responses) {
 	const full = path.join(VIEW_DIR, file);
@@ -1768,12 +1479,11 @@ async function main() {
 		for (const [shapeName, responses] of RPC_SHAPES)
 			await exerciseView(view, shapeName, responses);
 	}
-	await exerciseSubscriptionTextValueContracts('24.10');
-	await exerciseSubscriptionTextValueContracts('25.12');
 	await exerciseOverviewContracts();
 	await exerciseTemplateRefreshContracts();
 	await exerciseOverviewRenderingSafety();
 	await exerciseCustomLogoApplyContracts();
+	await exerciseTuningChoiceContracts();
 	await exerciseDpiWanModeContracts();
 
 	console.log(`${checks} checks, ${failures} failures`);

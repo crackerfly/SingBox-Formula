@@ -23,19 +23,13 @@ TIMEOUT="${PROBE_TIMEOUT:-25}"
 WORK=$(mktemp -d /tmp/sbf-probe.XXXXXX) || exit 1
 trap 'rm -rf "$WORK"' 0 INT TERM HUP
 
-UA_LIST='sing-box 1.11.0
-SFI/1.11.0 (sing-box 1.11.0)
-SFA/1.11.0 (sing-box 1.11.0)
-mihomo/1.19.0
-clash-verge/v2.0.3
-ClashMetaForAndroid/2.11.0.Meta
-Clash/v1.18.0
-v2rayN/7.0.0
-v2rayNG/1.9.16
-Shadowrocket/2.2.35
-Stash/2.7.0
-Loon/3.2.0
-Karing/1.0.0'
+UA_LIST='v2rayN/7.24.4
+v2rayNG/2.2.6
+sing-box 1.13.15
+SFI/1.13.15 (sing-box 1.13.15)
+SFA/1.13.15 (sing-box 1.13.15)
+SFM/1.13.15 (sing-box 1.13.15)
+Karing/1.2.23.2605'
 
 # classify <文件> -> 打印格式判断
 classify() {

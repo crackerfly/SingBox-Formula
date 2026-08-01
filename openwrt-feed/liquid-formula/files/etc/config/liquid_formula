@@ -5,8 +5,9 @@ config global 'main'
 	option boot_delay '90'
 	option port '9716'
 	option password '890716'
+	option subscription_url ''
 	# 拉取订阅时使用的 User-Agent；留空 = 使用转换器内置默认值
-	option user_agent 'sing-box 1.11.0'
+	option user_agent 'v2rayN/7.24.4'
 	# 放行 FakeHTTP / FakeSIP 注入的伪造包, 使其不被 momo 劫持进 sing-box
 	option momo_bypass_fakehttp '1'
 	option momo_bypass_fakesip '1'

@@ -25,6 +25,7 @@ INIT_DIR="${LFAPP_INIT_DIR:-/etc/init.d}"
 FLOCK_BIN="${LFAPP_FLOCK_BIN:-flock}"
 LOCK_FILE="${LFAPP_TUNING_LOCK:-/var/lock/liquid-formula-tuning.lock}"
 LOCK_WAIT="${LFAPP_TUNING_LOCK_WAIT:-30}"
+OPENWRT_RELEASE_FILE="${LFAPP_OPENWRT_RELEASE:-/etc/openwrt_release}"
 LOG_TAG=liquid-formula-tuning
 
 MANAGED_RE='^[[:space:]]*(net\.ipv4\.tcp_fastopen|net\.core\.default_qdisc|net\.ipv4\.tcp_congestion_control|net\.ipv4\.tcp_max_syn_backlog)[[:space:]]*='
@@ -104,6 +105,40 @@ valid_name() {
 		''|*[!a-z0-9_]*) return 1 ;;
 	esac
 	[ "${#1}" -le 32 ]
+}
+
+read_openwrt_release() {
+	local line value
+	[ -r "$OPENWRT_RELEASE_FILE" ] || return 1
+	while IFS= read -r line; do
+		case "$line" in
+			DISTRIB_RELEASE=*)
+				value=${line#DISTRIB_RELEASE=}
+				case "$value" in
+					\'*\') value=${value#\'}; value=${value%\'} ;;
+					\"*\") value=${value#\"}; value=${value%\"} ;;
+				esac
+				printf '%s\n' "$value"
+				return 0
+				;;
+		esac
+	done < "$OPENWRT_RELEASE_FILE"
+	return 1
+}
+
+supports_cake_mq() {
+	local release major rest minor
+	release="$(read_openwrt_release)" || return 1
+	case "$release" in
+		*.*) ;;
+		*) return 1 ;;
+	esac
+	major=${release%%.*}
+	rest=${release#*.}
+	minor=${rest%%.*}
+	case "$major" in ''|*[!0-9]*) return 1 ;; esac
+	case "$minor" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$major" -gt 25 ] || { [ "$major" -eq 25 ] && [ "$minor" -ge 12 ]; }
 }
 
 # 所有持久化文件都先在目标目录旁边准备好，再用 rename 提交。这样既不会
@@ -507,10 +542,24 @@ main() {
 
 	valid_uint "$tcp_fastopen" || { fail "invalid tcp_fastopen"; return 1; }
 	[ "$tcp_fastopen" -le 3 ] || { fail "tcp_fastopen must be 0-3"; return 1; }
-	valid_name "$default_qdisc" || { fail "invalid default_qdisc"; return 1; }
-	valid_name "$congestion_control" || { fail "invalid congestion_control"; return 1; }
-	valid_uint "$backlog" || { fail "invalid tcp_max_syn_backlog"; return 1; }
-	[ "$backlog" -ge 128 ] || { fail "tcp_max_syn_backlog must be at least 128"; return 1; }
+	case "$default_qdisc" in
+		cake|fq_codel) ;;
+		cake_mq)
+			supports_cake_mq || {
+				fail "cake_mq requires OpenWrt 25.12 or newer"
+				return 1
+			}
+			;;
+		*) fail "invalid default_qdisc: $default_qdisc"; return 1 ;;
+	esac
+	case "$congestion_control" in
+		bbr|cubic|reno) ;;
+		*) fail "invalid congestion_control: $congestion_control"; return 1 ;;
+	esac
+	case "$backlog" in
+		128|512|1024|2048) ;;
+		*) fail "invalid tcp_max_syn_backlog: $backlog"; return 1 ;;
+	esac
 
 	stage_dropin || return 1
 	stage_stripped_sysctl_conf || return 1

@@ -10,28 +10,22 @@ REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 
 PACKAGE_DIR="$REPO_ROOT/openwrt-feed/liquid-formula"
 SOURCE_DIR=${SOURCE_DIR:-"$PACKAGE_DIR/src"}
-SUBSCRIPTION_HELPER_DIR="$PACKAGE_DIR/src-subscription-gateway"
 PACKAGE_MAKEFILE="$PACKAGE_DIR/Makefile"
-LUCI_PACKAGE_MAKEFILE="$REPO_ROOT/openwrt-feed/luci-app-liquid-formula/Makefile"
-READINESS_WRAPPER="$PACKAGE_DIR/files/usr/share/liquid-formula/wait-subscription-gateway.sh"
+WORKFLOW="$REPO_ROOT/.github/workflows/build.yml"
 UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manifest"
 PATCHED_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.patched-paths"
 LOCAL_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-local-paths"
-TEMPLATE_HASHES="$SCRIPT_DIR/fixtures/template-1.8.4.sha256"
 FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.3.manifest"
 UPSTREAM_COMMIT=8222509aff98229886d304ef72e1d0affb087a62
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 LUMBERJACK_MIT_SHA256=4eb222b860ec541a0f981a01de5454ba50d09d38b2d09fa6894ed0bf6331293e
-BASELINE_183_COMMIT=a60f59308847acc79d166794488149df6d08ad46
-GO_SOURCE_TREE=d4f299087af3fdb87f7728846425d48edfeb7ae4
-MOMO_TEMPLATE_SHA256=ac1648ec562b7d8e23407baeea758f3788889054f6c1bca56220534077c715c3
-LOCALDNS_TEMPLATE_SHA256=9dc80b9caf2eba67ca4b542c480a10a3f88ef8082903a3c10f31a141b1b0fbdf
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-source-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
-# 仓库约定所有跟踪文件提交为 100644，执行位由 restore-executable-modes.sh 运行时恢复
-tracked_modes=$(git -C "$REPO_ROOT" ls-files -s | awk '$1!="100644"{sub(/^[^\t]*\t/,""); print}')
+# 仓库索引始终保持普通文件模式；web-upload 工作树所需的执行位由恢复脚本提供。
+tracked_modes=$(git -C "$REPO_ROOT" ls-files -s |
+	awk '$1 != "100644" { sub(/^[^\t]*\t/, ""); print }')
 assert_equal "" "$tracked_modes" "every tracked file is committed as 100644"
 
 find_elf_files() {
@@ -45,18 +39,6 @@ find_elf_files() {
 	' sh {} +
 }
 
-template_sha256() {
-	awk -v name="$1" '$2 == name { print $1; exit }' "$TEMPLATE_HASHES"
-}
-
-assert_file_exists "$TEMPLATE_HASHES" "records the authoritative 1.8.4 template hashes"
-fixture_baseline_commit=$(sed -n 's/^# Liquid Formula 1.8.3 baseline commit: //p' "$TEMPLATE_HASHES")
-fixture_go_source_tree=$(sed -n 's/^# Go source tree digest: //p' "$TEMPLATE_HASHES")
-assert_equal "$BASELINE_183_COMMIT" "$fixture_baseline_commit" "records the 1.8.3 baseline commit"
-assert_equal "$GO_SOURCE_TREE" "$fixture_go_source_tree" "records the unchanged Go-source tree digest"
-assert_equal "$MOMO_TEMPLATE_SHA256" "$(template_sha256 momo-template.json)" "records the supplied momo template hash"
-assert_equal "$LOCALDNS_TEMPLATE_SHA256" "$(template_sha256 localdns-template.json)" "records the supplied local DNS template hash"
-
 ACTUAL_SOURCE_MANIFEST="$TEST_TMP/converter-source.manifest"
 assert_command_success \
 	"writes the working converter source manifest" \
@@ -66,14 +48,84 @@ assert_files_equal \
 	"$ACTUAL_SOURCE_MANIFEST" \
 	"keeps the working converter source identical to the frozen 1.8.3 manifest"
 
-assert_file_sha256 \
-	"$MOMO_TEMPLATE_SHA256" \
-	"$PACKAGE_DIR/files/www/liquid-formula/templates/momo-template.json" \
-	"ships the authoritative momo template at its packaged path"
-assert_file_sha256 \
-	"$LOCALDNS_TEMPLATE_SHA256" \
-	"$PACKAGE_DIR/files/www/liquid-formula/templates/localdns-template.json" \
-	"ships the authoritative local DNS template at its packaged path"
+WORKFLOW_ARCHES=$(python3 -S - "$WORKFLOW" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    lines = stream.read().splitlines()
+
+try:
+    jobs_start = lines.index("jobs:")
+except ValueError:
+    raise SystemExit(1)
+
+test_jobs = [
+    index
+    for index in range(jobs_start + 1, len(lines))
+    if lines[index] == "  test:"
+]
+if len(test_jobs) != 1:
+    raise SystemExit(1)
+test_start = test_jobs[0]
+job_header = re.compile(r"^  [A-Za-z0-9_-]+:\s*(?:#.*)?$")
+test_end = next(
+    (index for index in range(test_start + 1, len(lines)) if job_header.match(lines[index])),
+    len(lines),
+)
+
+step_name = "      - name: Compile converter for representative architectures"
+matches = [
+    index
+    for index in range(test_start + 1, test_end)
+    if lines[index] == step_name
+]
+if len(matches) != 1:
+    raise SystemExit(1)
+step_start = matches[0]
+step_end = next(
+    (
+        index
+        for index in range(step_start + 1, test_end)
+        if lines[index].startswith("      - ")
+    ),
+    test_end,
+)
+run_headers = [
+    index
+    for index in range(step_start + 1, step_end)
+    if lines[index] == "        run: |"
+]
+if len(run_headers) != 1:
+    raise SystemExit(1)
+run_lines = []
+for line in lines[run_headers[0] + 1 : step_end]:
+    if line.startswith("          "):
+        run_lines.append(line[10:])
+    elif not line:
+        run_lines.append("")
+    else:
+        break
+run = "\n".join(run_lines)
+loop = re.search(r"for goarch in ([A-Za-z0-9_ ]+); do", run)
+if loop is None:
+    raise SystemExit(1)
+arches = loop.group(1).split()
+if arches != ["amd64", "arm", "arm64"]:
+    raise SystemExit(1)
+required = [
+    'CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build',
+    'test -s "$output"',
+]
+if any(fragment not in run for fragment in required):
+    raise SystemExit(1)
+print(" ".join(arches))
+PY
+)
+assert_equal \
+	"amd64 arm arm64" \
+	"$WORKFLOW_ARCHES" \
+	"workflow smoke-compiles the converter for amd64, arm, and arm64"
 
 assert_file_content \
 	"$UPSTREAM_COMMIT" \
@@ -131,24 +183,6 @@ assert_file_sha256 \
 assert_file_not_exists \
 	"$PACKAGE_DIR/files/usr/bin/sb-sub-c" \
 	"does not ship the old prebuilt converter"
-assert_file_not_exists \
-	"$PACKAGE_DIR/files/usr/bin/liquid-formula-subscription-gateway" \
-	"does not ship a prebuilt subscription gateway"
-assert_file_exists \
-	"$SUBSCRIPTION_HELPER_DIR/main.go" \
-	"ships the subscription gateway source outside the frozen converter tree"
-assert_file_exists \
-	"$SUBSCRIPTION_HELPER_DIR/normalizer.go" \
-	"ships the bounded normalizer source outside the frozen converter tree"
-assert_file_exists \
-	"$READINESS_WRAPPER" \
-	"ships the subscription-gateway readiness wrapper"
-assert_file_not_exists \
-	"$SUBSCRIPTION_HELPER_DIR/go.mod" \
-	"does not add a second Go module"
-assert_file_not_exists \
-	"$SUBSCRIPTION_HELPER_DIR/go.work" \
-	"does not add a Go workspace"
 
 ELF_FILES=$(find_elf_files "$PACKAGE_DIR")
 assert_empty "$ELF_FILES" "contains no ELF binary anywhere in the package tree"
@@ -202,12 +236,8 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.5[[:space:]]*$' \
-	"sets main package version 1.8.5 in active top-level metadata"
-assert_make_top_level_contains \
-	"$LUCI_PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.5[[:space:]]*$' \
-	"sets LuCI package version 1.8.5 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.6[[:space:]]*$' \
+	"sets package version 1.8.6 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \
@@ -226,8 +256,8 @@ assert_make_top_level_contains \
 	"sets the upstream Go module in active helper metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*GO_PKG_BUILD_PKG[[:space:]]*:=[[:space:]]*\$\(GO_PKG\)[[:space:]]+\$\(GO_PKG\)/cmd/liquid-formula-subscription-gateway[[:space:]]*$' \
-	"builds the converter and subscription gateway from the existing module"
+	'^[[:space:]]*GO_PKG_BUILD_PKG[[:space:]]*:=[[:space:]]*github\.com/haierkeys/singbox-subscribe-convert[[:space:]]*$' \
+	"builds the converter main package in active helper metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*GO_PKG_INSTALL_EXTRA[[:space:]]*:=[[:space:]]*config/config\.yaml[[:space:]]*$' \
@@ -280,11 +310,6 @@ assert_make_block_contains \
 	"prepares the build directory from vendored source in Build/Prepare"
 assert_make_block_contains \
 	"$PACKAGE_MAKEFILE" \
-	'Build/Prepare' \
-	'^[[:space:]]*\$\(CP\)[[:space:]]+\./src-subscription-gateway/\.[[:space:]]+\$\(PKG_BUILD_DIR\)/cmd/liquid-formula-subscription-gateway/[[:space:]]*$' \
-	"stages the external helper below the existing module in Build/Prepare"
-assert_make_block_contains \
-	"$PACKAGE_MAKEFILE" \
 	'Build/Compile' \
 	'^[[:space:]]*\$\(call[[:space:]]+GoPackage/Build/Compile\)[[:space:]]*$' \
 	"invokes the OpenWrt Go helper in Build/Compile"
@@ -295,24 +320,9 @@ assert_make_block_contains \
 	"materializes the target-built converter in Build/Compile"
 assert_make_block_contains \
 	"$PACKAGE_MAKEFILE" \
-	'Build/Compile' \
-	'^[[:space:]]*\$\(CP\)[[:space:]]+\$\(GO_PKG_BUILD_BIN_DIR\)/liquid-formula-subscription-gateway[[:space:]]+\$\(PKG_BUILD_DIR\)/liquid-formula-subscription-gateway[[:space:]]*$' \
-	"materializes the target-built subscription gateway in Build/Compile"
-assert_make_block_contains \
-	"$PACKAGE_MAKEFILE" \
 	'Package/liquid-formula/install' \
 	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\$\(PKG_BUILD_DIR\)/sb-sub-c[[:space:]]+\$\(1\)/usr/bin/sb-sub-c[[:space:]]*$' \
 	"installs the target-built converter from the active install block"
-assert_make_block_contains \
-	"$PACKAGE_MAKEFILE" \
-	'Package/liquid-formula/install' \
-	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\$\(PKG_BUILD_DIR\)/liquid-formula-subscription-gateway[[:space:]]+\$\(1\)/usr/bin/liquid-formula-subscription-gateway[[:space:]]*$' \
-	"installs the target-built subscription gateway from the active install block"
-assert_make_block_contains \
-	"$PACKAGE_MAKEFILE" \
-	'Package/liquid-formula/install' \
-	'^[[:space:]]*\$\(INSTALL_BIN\)[[:space:]]+\./files/usr/share/liquid-formula/wait-subscription-gateway\.sh[[:space:]]+\$\(1\)/usr/share/liquid-formula/wait-subscription-gateway\.sh[[:space:]]*$' \
-	"installs the subscription-gateway readiness wrapper"
 assert_not_contains \
 	"$PACKAGE_MAKEFILE" \
 	'\./files/usr/bin/sb-sub-c' \

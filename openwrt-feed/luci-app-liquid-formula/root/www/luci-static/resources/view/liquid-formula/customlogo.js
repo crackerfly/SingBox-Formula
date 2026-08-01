@@ -32,6 +32,16 @@ function bindTuning(o, option, fallback) {
 	return o;
 }
 
+function supportsCakeMq(release) {
+	var match = String(release || '').match(/^(\d+)\.(\d+)(?:\.|$)/);
+	var major, minor;
+	if (!match)
+		return false;
+	major = Number(match[1]);
+	minor = Number(match[2]);
+	return major > 25 || (major === 25 && minor >= 12);
+}
+
 function liveRow(label, value, note) {
 	return E('tr', { 'class': 'tr' }, [
 		E('td', { 'class': 'td left', 'style': 'width:38%' }, [ label ]),
@@ -220,6 +230,7 @@ return view.extend({
 		var tuning = (data && data[2]) || {};
 		var live = tuning.live || {};
 		var irq = tuning.irqbalance || {};
+		var cakeMqSupported = supportsCakeMq(tuning.openwrt_release);
 
 		m = new form.Map('customlogo', _('Tuning Utility'),
 			_('Use the trusted built-in SVG or upload a PNG logo and a PNG/ICO browser icon. User-supplied SVG files are intentionally blocked for security.'));
@@ -305,30 +316,34 @@ return view.extend({
 		o.value('3', _('3 - client and server'));
 		o.depends('tuning_enabled', '1');
 
-		o = bindTuning(s.option(form.Value, 'tuning_default_qdisc', _('Default queueing discipline'),
-			_('cake needs kmod-sched-cake; fq_codel is usually built in. Anything not listed can be typed in.')),
+		o = bindTuning(s.option(form.ListValue, 'tuning_default_qdisc', _('Default queueing discipline'),
+			_('Choose one of the queueing disciplines supported by this release. cake and cake_mq need kmod-sched-cake.')),
 			'default_qdisc', 'cake');
+		o.default = 'cake';
 		o.value('cake', 'cake' + (tuning.cake_module === false ? ' (' + _('module missing') + ')' : ''));
+		if (cakeMqSupported)
+			o.value('cake_mq', 'cake_mq' + (tuning.cake_module === false ? ' (' + _('module missing') + ')' : ''));
 		o.value('fq_codel', 'fq_codel');
-		o.value('fq', 'fq');
-		o.value('pfifo_fast', 'pfifo_fast');
 		o.depends('tuning_enabled', '1');
 
-		o = bindTuning(s.option(form.Value, 'tuning_congestion_control', _('Congestion control'),
-			_('bbr needs kmod-tcp-bbr. Reported as available by the running kernel: %s')
+		o = bindTuning(s.option(form.ListValue, 'tuning_congestion_control', _('Congestion control'),
+			_('Choose bbr, cubic or reno. bbr needs kmod-tcp-bbr. Reported as available by the running kernel: %s')
 				.format(tuning.available_congestion_control || _('unknown'))),
 			'congestion_control', 'bbr');
+		o.default = 'bbr';
 		o.value('bbr', 'bbr' + (tuning.bbr_module === false ? ' (' + _('module missing') + ')' : ''));
-		String(tuning.available_congestion_control || '').split(/\s+/).forEach(function(name) {
-			if (name && name !== 'bbr')
-				o.value(name, name);
-		});
+		o.value('cubic', 'cubic');
+		o.value('reno', 'reno');
 		o.depends('tuning_enabled', '1');
 
-		o = bindTuning(s.option(form.Value, 'tuning_backlog', _('SYN backlog'),
-			_('Length of the half-open connection queue. Minimum 128.')),
+		o = bindTuning(s.option(form.ListValue, 'tuning_backlog', _('SYN backlog'),
+			_('Length of the half-open connection queue.')),
 			'tcp_max_syn_backlog', '512');
-		o.datatype = 'min(128)';
+		o.default = '512';
+		o.value('128', '128');
+		o.value('512', '512');
+		o.value('1024', '1024');
+		o.value('2048', '2048');
 		o.depends('tuning_enabled', '1');
 
 		o = bindTuning(s.option(form.Flag, 'tuning_irqbalance', _('Balance hardware interrupts'),

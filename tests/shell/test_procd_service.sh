@@ -20,11 +20,8 @@ START_LOG="$TEST_TMP/start.log"
 LIFECYCLE_LOG="$TEST_TMP/lifecycle.log"
 CONF="$MOCK_ROOT/etc/liquid-formula/config.yaml"
 PROG="$MOCK_ROOT/usr/bin/sb-sub-c"
-GATEWAY_PROG="$MOCK_ROOT/usr/bin/liquid-formula-subscription-gateway"
 GEN="$MOCK_ROOT/usr/share/liquid-formula/generate-config.sh"
 DELAY_HELPER="$MOCK_ROOT/usr/share/liquid-formula/run-delayed.sh"
-READINESS_HELPER="$MOCK_ROOT/usr/share/liquid-formula/wait-subscription-gateway.sh"
-SUBSCRIPTION_URLS="$TEST_TMP/subscription-url.list"
 INIT_UNDER_TEST="$TEST_TMP/init-under-test.sh"
 
 mkdir -p "$MOCK_BIN" "$(dirname "$CONF")" "$(dirname "$PROG")" "$(dirname "$GEN")"
@@ -35,17 +32,8 @@ exit 0
 EOF
 chmod 0755 "$PROG"
 
-cat > "$GATEWAY_PROG" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod 0755 "$GATEWAY_PROG"
-
 cat > "$GEN" <<EOF
 #!/bin/sh
-printf 'generator\n' >> "$PROCD_LOG"
-printf 'generator-include-disabled:%s\n' "\${SBF_INCLUDE_DISABLED_URLS:-0}" >> "$PROCD_LOG"
-[ "\${MOCK_GENERATOR_FAIL:-0}" != 1 ] || exit 74
 printf '%s\n' "\${MOCK_CONFIG_BODY:-config-a}" > "$CONF"
 EOF
 chmod 0755 "$GEN"
@@ -55,12 +43,6 @@ cat > "$DELAY_HELPER" <<'EOF'
 exit 0
 EOF
 chmod 0755 "$DELAY_HELPER"
-
-cat > "$READINESS_HELPER" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod 0755 "$READINESS_HELPER"
 
 cat > "$MOCK_BIN/uci" <<'EOF'
 #!/bin/sh
@@ -85,15 +67,13 @@ sed \
 	-e "s|^CONF=.*|CONF='$CONF'|" \
 	-e "s|^WORKDIR=.*|WORKDIR='$(dirname "$CONF")'|" \
 	-e "s|^DELAY_HELPER=.*|DELAY_HELPER='$DELAY_HELPER'|" \
-	-e "s|/usr/bin/liquid-formula-subscription-gateway|$GATEWAY_PROG|g" \
-	-e "s|/usr/share/liquid-formula/wait-subscription-gateway\\.sh|$READINESS_HELPER|g" \
 	-e "s|/var/lib/liquid-formula|$MOCK_ROOT/var/lib/liquid-formula|g" \
 	-e "s|/var/log/liquid-formula|$MOCK_ROOT/var/log/liquid-formula|g" \
 	"$INIT_SOURCE" > "$INIT_UNDER_TEST"
 
 PATH="$MOCK_BIN:$PATH"
 SBF_STATE_DIR="$MOCK_ROOT/var/run/liquid-formula"
-export PATH MOCK_CONFIG_BODY MOCK_TIMEZONE SBF_STATE_DIR PROCD_LOG
+export PATH MOCK_CONFIG_BODY MOCK_TIMEZONE SBF_STATE_DIR
 
 config_load() {
 	:
@@ -101,53 +81,16 @@ config_load() {
 
 config_get_bool() {
 	_variable=$1
-	_section=$2
-	_option=$3
 	_default=$4
-	_key=UCI_${_section}_${_option}
-	eval "_is_set=\${$_key+x}"
-	if [ "$_is_set" = x ]; then
-		eval "_value=\${$_key}"
-	else
-		_value=$_default
-	fi
+	_value=${MOCK_ENABLED:-$_default}
 	eval "$_variable=\$_value"
 }
 
 config_get() {
 	_variable=$1
-	_section=$2
-	_option=$3
 	_default=$4
-	_key=UCI_${_section}_${_option}
-	eval "_is_set=\${$_key+x}"
-	if [ "$_is_set" = x ]; then
-		eval "_value=\${$_key}"
-	else
-		_value=$_default
-	fi
+	_value=${MOCK_DELAY:-$_default}
 	eval "$_variable=\$_value"
-}
-
-config_list_foreach() {
-	_section=$1
-	_option=$2
-	_callback=$3
-	_key=UCI_${_section}_${_option}_LIST_FILE
-	eval "_list_file=\${$_key:-}"
-	[ -n "$_list_file" ] && [ -f "$_list_file" ] || return 0
-	while IFS= read -r _item || [ -n "$_item" ]; do
-		"$_callback" "$_item" || return $?
-	done < "$_list_file"
-}
-
-config_foreach() {
-	_callback=$1
-	_type=$2
-	[ "$_type" = template ] || return 0
-	for _section in ${UCI_TEMPLATE_IDS:-}; do
-		"$_callback" "$_section" || return $?
-	done
 }
 
 procd_open_instance() {
@@ -186,12 +129,10 @@ install_procd_mutation_mocks() {
 	}
 	_procd_kill() {
 		if [ -f "$SBF_STATE_DIR/lifecycle.lock/owner" ]; then
-			printf 'kill:locked' >> "$LIFECYCLE_LOG"
+			printf 'kill:locked\n' >> "$LIFECYCLE_LOG"
 		else
-			printf 'kill:unlocked' >> "$LIFECYCLE_LOG"
+			printf 'kill:unlocked\n' >> "$LIFECYCLE_LOG"
 		fi
-		for _argument do printf '|%s' "$_argument" >> "$LIFECYCLE_LOG"; done
-		printf '\n' >> "$LIFECYCLE_LOG"
 		return "${MOCK_PROCD_KILL_RC:-0}"
 	}
 	procd_close_service() { _procd_close_service "$@"; }
@@ -256,24 +197,6 @@ assert_no_literal() {
 	fi
 }
 
-assert_order() {
-	_file=$1
-	_first=$2
-	_second=$3
-	_description=$4
-	_first_line=$(grep -nF -- "$_first" "$_file" | head -n 1 | cut -d: -f1)
-	_second_line=$(grep -nF -- "$_second" "$_file" | head -n 1 | cut -d: -f1)
-	if [ -n "$_first_line" ] && [ -n "$_second_line" ] && [ "$_first_line" -lt "$_second_line" ]; then
-		record_ok "$_description"
-	else
-		record_failure "$_description"
-	fi
-}
-
-literal_count() {
-	grep -F -c -- "$1" "$2" 2>/dev/null || true
-}
-
 run_service() {
 	_mode=$1
 	: > "$PROCD_LOG"
@@ -284,45 +207,18 @@ run_service() {
 	fi
 }
 
-UCI_main_enabled=1
-UCI_main_boot_delay=37
-UCI_main_port=43210
-UCI_main_subscription_timeout=17
-UCI_main_subscription_url_LIST_FILE=$SUBSCRIPTION_URLS
-UCI_TEMPLATE_IDS='momo_template localdns_template'
-UCI_momo_template_enabled=1
-UCI_localdns_template_enabled=1
-printf '%s\n' \
-	'https://first.example/sub?token=secret-one' \
-	'https://second.example/sub?token=secret-two' \
-	'https://first.example/sub?token=secret-one' > "$SUBSCRIPTION_URLS"
+MOCK_ENABLED=1
+MOCK_DELAY=37
 MOCK_CONFIG_BODY=config-default
-export UCI_main_enabled UCI_main_boot_delay UCI_main_port UCI_main_subscription_timeout
-export UCI_main_subscription_url_LIST_FILE UCI_TEMPLATE_IDS
-export UCI_momo_template_enabled UCI_localdns_template_enabled MOCK_CONFIG_BODY
+export MOCK_ENABLED MOCK_DELAY MOCK_CONFIG_BODY
 run_service ''
-assert_order "$PROCD_LOG" 'generator' 'open|gateway' 'generation completes before either procd instance is opened'
-assert_order "$PROCD_LOG" 'open|gateway' 'open|main' 'gateway is published before the converter instance'
-assert_literal "$PROCD_LOG" 'open|gateway' 'default reconcile registers the named gateway instance'
 assert_literal "$PROCD_LOG" 'open|main' 'default reconcile registers the named main instance'
+assert_literal "$PROCD_LOG" "param|command|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" 'default reconcile runs the converter directly'
+assert_literal "$PROCD_LOG" 'param|respawn|30|5|5' 'main instance has bounded respawn settings'
+assert_literal "$PROCD_LOG" 'param|term_timeout|5' 'main instance has a five-second term timeout'
 
 expected_digest=$(sha256sum "$CONF")
 expected_digest=${expected_digest%% *}
-assert_literal "$PROCD_LOG" \
-	"param|command|$GATEWAY_PROG|serve|--config|$CONF|--expected-digest|$expected_digest" \
-	'gateway uses the frozen serve CLI with the exact generated config digest'
-assert_order "$PROCD_LOG" \
-	"param|command|$GATEWAY_PROG|serve|--config|$CONF|--expected-digest|$expected_digest" \
-	'open|main' \
-	'gateway command is complete before main publication begins'
-assert_literal "$PROCD_LOG" \
-	"param|command|$READINESS_HELPER|reconcile|37|43211|$expected_digest|205|--|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" \
-	'default reconcile always runs the converter through the readiness wrapper'
-assert_no_literal "$PROCD_LOG" \
-	"param|command|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" \
-	'main is never published with a direct converter command'
-assert_equals 2 "$(literal_count 'param|respawn|30|5|5' "$PROCD_LOG")" 'both procd instances have bounded respawn settings'
-assert_equals 2 "$(literal_count 'param|term_timeout|5' "$PROCD_LOG")" 'both procd instances have five-second termination bounds'
 assert_literal "$PROCD_LOG" "CONFIG_DIGEST=$expected_digest" 'main instance environment contains the generated config digest'
 
 MOCK_CONFIG_BODY=config-changed
@@ -330,102 +226,59 @@ export MOCK_CONFIG_BODY
 run_service ''
 changed_digest=$(sha256sum "$CONF")
 changed_digest=${changed_digest%% *}
-if [ "$changed_digest" != "$expected_digest" ] &&
-	grep -Fq "CONFIG_DIGEST=$changed_digest" "$PROCD_LOG" &&
-	grep -Fq -- "--expected-digest|$changed_digest" "$PROCD_LOG" &&
-	grep -Fq -- "|$changed_digest|205|--|$PROG" "$PROCD_LOG"; then
-	record_ok 'config content changes update gateway, wrapper, and procd digest identity'
+if [ "$changed_digest" != "$expected_digest" ] && grep -Fq "CONFIG_DIGEST=$changed_digest" "$PROCD_LOG"; then
+	record_ok 'config content changes update the procd digest environment'
 else
-	record_failure 'config content changes update gateway, wrapper, and procd digest identity'
+	record_failure 'config content changes update the procd digest environment'
 fi
 
-UCI_main_enabled=0
-export UCI_main_enabled
+MOCK_ENABLED=0
+export MOCK_ENABLED
 printf 'open|main\n' > "$PROCD_LOG"
 reload_service
-assert_literal "$PROCD_LOG" 'generator' 'disabled reconcile still regenerates the canonical config'
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'disabled default reconcile publishes no gateway instance'
-assert_no_literal "$PROCD_LOG" 'open|main' 'disabled default reconcile publishes no main instance'
+assert_empty "$(cat "$PROCD_LOG")" 'disabled default reconcile publishes no main instance'
 
 chmod 0644 "$PROG"
 if reload_service; then
-	record_ok 'disabled reconcile removes both instances even when the converter binary is unavailable'
+	record_ok 'disabled reconcile removes main even when the converter binary is unavailable'
 else
-	record_failure 'disabled reconcile removes both instances even when the converter binary is unavailable'
+	record_failure 'disabled reconcile removes main even when the converter binary is unavailable'
 fi
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'disabled reconcile with no converter still publishes no gateway'
-assert_no_literal "$PROCD_LOG" 'open|main' 'disabled reconcile with no converter still publishes no main'
+assert_empty "$(cat "$PROCD_LOG")" 'disabled reconcile with no converter still publishes no instance'
 chmod 0755 "$PROG"
 
-UCI_main_enabled=0
+MOCK_ENABLED=0
 MOCK_CONFIG_BODY=config-manual
-export UCI_main_enabled MOCK_CONFIG_BODY
+export MOCK_ENABLED MOCK_CONFIG_BODY
 run_service manual
-manual_digest=$(sha256sum "$CONF")
-manual_digest=${manual_digest%% *}
-assert_literal "$PROCD_LOG" 'open|gateway' 'manual mode publishes the gateway while disk enabled is false'
 assert_literal "$PROCD_LOG" 'open|main' 'manual mode may start while disk enabled is false'
-assert_literal "$PROCD_LOG" 'generator-include-disabled:1' 'manual mode explicitly includes saved disabled subscription URLs'
-assert_literal "$PROCD_LOG" \
-	"param|command|$READINESS_HELPER|manual|37|43211|$manual_digest|205|--|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" \
-	'manual mode uses the readiness wrapper without changing its CLI shape'
+assert_literal "$PROCD_LOG" "param|command|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" 'manual mode bypasses the boot delay helper'
+assert_no_literal "$PROCD_LOG" "$DELAY_HELPER" 'manual mode never invokes the delay helper'
 
-UCI_main_enabled=1
-UCI_main_boot_delay=37
-export UCI_main_enabled UCI_main_boot_delay
+MOCK_ENABLED=1
+MOCK_DELAY=37
+export MOCK_ENABLED MOCK_DELAY
 run_service boot
-boot_digest=$(sha256sum "$CONF")
-boot_digest=${boot_digest%% *}
-assert_literal "$PROCD_LOG" 'open|gateway' 'enabled boot mode registers gateway'
 assert_literal "$PROCD_LOG" 'open|main' 'enabled boot mode registers main'
-assert_literal "$PROCD_LOG" \
-	"param|command|$READINESS_HELPER|boot|37|43211|$boot_digest|205|--|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" \
-	'boot mode puts readiness and delay handling under one procd-supervised wrapper'
+assert_literal "$PROCD_LOG" "param|command|$DELAY_HELPER|37|$PROG|run|-c|$CONF|-d|$(dirname "$CONF")" 'boot mode puts the delay helper under procd supervision'
 
-chmod 0644 "$READINESS_HELPER"
+chmod 0644 "$DELAY_HELPER"
 : > "$PROCD_LOG"
 if start boot >/dev/null 2>&1; then
-	record_failure 'boot mode rejects a missing readiness wrapper'
+	record_failure 'boot mode rejects a missing delay helper'
 else
-	record_ok 'boot mode rejects a missing readiness wrapper'
+	record_ok 'boot mode rejects a missing delay helper'
 fi
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'boot validates the readiness wrapper before publishing gateway'
-assert_no_literal "$PROCD_LOG" 'open|main' 'boot validates the readiness wrapper before publishing main'
-chmod 0755 "$READINESS_HELPER"
+assert_empty "$(cat "$PROCD_LOG")" 'boot validates the delay helper before opening a procd instance'
+chmod 0755 "$DELAY_HELPER"
 
-chmod 0644 "$GATEWAY_PROG"
-: > "$PROCD_LOG"
-if start manual >/dev/null 2>&1; then
-	record_failure 'manual mode rejects a missing gateway executable'
-else
-	record_ok 'manual mode rejects a missing gateway executable'
-fi
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'gateway validation happens before any partial publication'
-assert_no_literal "$PROCD_LOG" 'open|main' 'gateway validation failure cannot leave a main-only service'
-chmod 0755 "$GATEWAY_PROG"
-
-MOCK_CONFIG_BODY=config-partial
-MOCK_GENERATOR_FAIL=1
-export MOCK_CONFIG_BODY MOCK_GENERATOR_FAIL
-: > "$PROCD_LOG"
-if start manual >/dev/null 2>&1; then
-	record_failure 'manual mode propagates generator failure'
-else
-	record_ok 'manual mode propagates generator failure'
-fi
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'generator failure cannot publish a gateway instance'
-assert_no_literal "$PROCD_LOG" 'open|main' 'generator failure cannot publish a main instance'
-MOCK_GENERATOR_FAIL=0
-export MOCK_GENERATOR_FAIL
-
-UCI_main_enabled=0
-export UCI_main_enabled
+MOCK_ENABLED=0
+export MOCK_ENABLED
 run_service boot
-assert_no_literal "$PROCD_LOG" 'open|gateway' 'disabled boot mode registers no gateway instance'
-assert_no_literal "$PROCD_LOG" 'open|main' 'disabled boot mode registers no main instance'
+assert_empty "$(cat "$PROCD_LOG")" 'disabled boot mode registers no instance'
 
-UCI_main_enabled=1
-export UCI_main_enabled
+MOCK_ENABLED=1
+export MOCK_ENABLED
 : > "$START_LOG"
 boot
 assert_equals 'boot' "$(cat "$START_LOG")" 'boot delegates to start_service in boot mode through rc.common start'
@@ -557,11 +410,7 @@ else
 	record_failure 'direct admin restart completes under one lifecycle owner'
 fi
 assert_literal "$LIFECYCLE_LOG" 'kill:locked' 'restart holds the lifecycle lock through procd kill'
-assert_literal "$LIFECYCLE_LOG" 'kill:locked|liquid-formula' 'one service-group deletion stops gateway and main together'
 assert_literal "$LIFECYCLE_LOG" 'close:locked' 'restart keeps the same lifecycle lock through procd close'
-assert_literal "$PROCD_LOG" 'open|gateway' 'restart republishes the gateway instance'
-assert_literal "$PROCD_LOG" 'open|main' 'restart republishes the main instance'
-assert_order "$PROCD_LOG" 'open|gateway' 'open|main' 'restart preserves gateway-before-main publication order'
 assert_file_not_exists "$SBF_STATE_DIR/lifecycle.lock" 'direct restart releases its lifecycle lock after both phases'
 
 if [ -f "$HELPER_SOURCE" ]; then

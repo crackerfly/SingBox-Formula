@@ -1,1 +1,0 @@
-This is a control-plane error page with secret-token=must-not-be-logged.

@@ -28,7 +28,6 @@ openwrt-feed/liquid-formula/files/etc/init.d/liquid-formula
 openwrt-feed/liquid-formula/files/etc/uci-defaults/99-liquid-formula
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/generate-config.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/run-delayed.sh
-openwrt-feed/liquid-formula/files/usr/share/liquid-formula/wait-subscription-gateway.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/update.sh
 openwrt-feed/liquid-formula/files/usr/share/liquid-formula/validate-template.sh
 tests/shell/test_generate_config.sh
@@ -37,8 +36,6 @@ tests/shell/test_procd_service.sh
 tests/shell/test_rpc_contract.sh
 tests/shell/test_template_transactions.sh
 tests/shell/test_update.sh
-tests/shell/test_subscription_normalize.sh
-tests/shell/test_subscription_aggregate.sh
 openwrt-feed/luci-app-liquid-formula/root/etc/init.d/liquid-formula-logo
 openwrt-feed/luci-app-liquid-formula/root/etc/uci-defaults/99-luci-app-liquid-formula
 openwrt-feed/luci-app-liquid-formula/root/usr/share/liquid-formula/apply-tuning.sh

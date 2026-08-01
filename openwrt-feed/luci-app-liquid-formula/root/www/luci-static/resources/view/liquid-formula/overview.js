@@ -29,10 +29,9 @@ function strictResult(res) {
 	return res;
 }
 
-// Keep the template manager and the default-template ListValue on one
-// authoritative snapshot.  Do not return a partial result here: callers must
-// be able to leave both rendered structures untouched when rpcd gives us a
-// malformed response.
+// The table and the default-template control must always consume one validated
+// backend snapshot. Reject malformed or duplicate entries before building any
+// DOM nodes so a failed refresh cannot partially replace the current view.
 function templateSnapshot(res) {
 	var ids = {};
 	if (!res || !Array.isArray(res.templates))
@@ -42,8 +41,8 @@ function templateSnapshot(res) {
 		    (typeof template.enabled !== 'boolean' && template.enabled !== 0 && template.enabled !== 1) ||
 		    typeof template.name !== 'string' || typeof template.file !== 'string' ||
 		    (template.no_node != null && typeof template.no_node !== 'string') ||
-		    typeof template.size !== 'number' ||
-		    typeof template.mtime !== 'string' || ids[template.id])
+		    typeof template.size !== 'number' || typeof template.mtime !== 'string' ||
+		    ids[template.id])
 			throw new Error(_('Invalid response from RPC backend.'));
 		ids[template.id] = true;
 		return {
@@ -218,40 +217,39 @@ function validateSubscriptionURL(value) {
 	var rest, authority, userinfo, hostport, hostname, suffix, colon, beforeQuery, fragment;
 	var lastAt, hostEscapes, escapeMatch, escapedByte;
 	if (!text)
-		return _('Subscription URL entries must not be empty.');
+		return _('The subscription URL is required.');
 	if (/[\x00-\x20\x7f]/.test(text))
 		return _('Subscription URLs must not contain ASCII whitespace or control characters.');
 	if (!/^https?:\/\//i.test(text))
-		return _('Each subscription URL must start with http:// or https://.');
+		return _('The subscription URL must start with http:// or https://.');
 	beforeQuery = text.split('?', 1)[0];
 	fragment = text.indexOf('#') === -1 ? '' : text.slice(text.indexOf('#') + 1);
-	if (/%(?![0-9A-Fa-f]{2})/.test(beforeQuery) ||
-	    /%(?![0-9A-Fa-f]{2})/.test(fragment))
-		return _('Subscription URLs must contain only valid percent escapes.');
+	if (/%(?![0-9A-Fa-f]{2})/.test(beforeQuery) || /%(?![0-9A-Fa-f]{2})/.test(fragment))
+		return _('The subscription URL must contain only valid percent escapes.');
 	rest = text.replace(/^https?:\/\//i, '');
 	authority = rest.split(/[\/?#]/, 1)[0];
 	if (!authority)
-		return _('Each subscription URL must contain a hostname.');
+		return _('The subscription URL must contain a hostname.');
 	lastAt = authority.lastIndexOf('@');
 	userinfo = lastAt === -1 ? '' : authority.slice(0, lastAt);
 	if (userinfo && (/^[^@]*@/.test(userinfo) || /["<>\\^`{|}\[\]]/.test(userinfo)))
 		return _('The subscription URL contains invalid user information.');
 	hostport = authority.slice(lastAt + 1);
 	if (!hostport)
-		return _('Each subscription URL must contain a hostname.');
+		return _('The subscription URL must contain a hostname.');
 	if (hostport.charAt(0) === '[') {
 		colon = hostport.indexOf(']');
 		if (colon <= 1)
-			return _('Each subscription URL must contain a valid bracketed hostname.');
+			return _('The subscription URL must contain a valid bracketed hostname.');
 		hostname = hostport.slice(1, colon);
 		if (!validIPv6Literal(hostname))
-			return _('Each bracketed subscription hostname must be an IPv6 address.');
+			return _('A bracketed subscription hostname must be an IPv6 address.');
 		suffix = hostport.slice(colon + 1);
 		if (suffix && !/^:\d*$/.test(suffix))
-			return _('Each subscription URL must contain a valid numeric port.');
+			return _('The subscription URL must contain a valid numeric port.');
 	} else {
 		if (/[\[\]]/.test(hostport))
-			return _('Each subscription URL must contain a valid hostname.');
+			return _('The subscription URL must contain a valid hostname.');
 		colon = hostport.indexOf(':');
 		if (colon === -1) {
 			hostname = hostport;
@@ -259,36 +257,18 @@ function validateSubscriptionURL(value) {
 			hostname = hostport.slice(0, colon);
 			suffix = hostport.slice(colon + 1);
 			if (!/^\d*$/.test(suffix))
-				return _('Each subscription URL must contain a valid numeric port.');
+				return _('The subscription URL must contain a valid numeric port.');
 		}
 		if (!hostname)
-			return _('Each subscription URL must contain a hostname.');
+			return _('The subscription URL must contain a hostname.');
 	}
 	if (/["<>\\^`{|}\[\]]/.test(hostname))
-		return _('Each subscription URL must contain a valid hostname.');
+		return _('The subscription URL must contain a valid hostname.');
 	hostEscapes = /%([0-9A-Fa-f]{2})/g;
 	while ((escapeMatch = hostEscapes.exec(hostname)) !== null) {
 		escapedByte = parseInt(escapeMatch[1], 16);
 		if (escapedByte < 0x80 && escapedByte !== 0x25)
 			return _('ASCII hostname bytes must not be percent-encoded.');
-	}
-	return true;
-}
-
-function validateSubscriptionList(values, enabled) {
-	var result;
-	if (!Array.isArray(values))
-		values = values == null ? [] : [ values ];
-	if (values.length > 8)
-		return _('At most eight subscription URLs are allowed.');
-	if (!values.length)
-		return enabled
-			? _('At least one subscription URL is required while the service is enabled.')
-			: true;
-	for (var i = 0; i < values.length; i++) {
-		result = validateSubscriptionURL(values[i]);
-		if (result !== true)
-			return result;
 	}
 	return true;
 }
@@ -381,49 +361,28 @@ return view.extend({
 		o.datatype = 'range(0,600)';
 		o.default = '90';
 
-		o = s.option(form.TextValue, 'subscription_url', _('Source subscription URLs'),
-			_('Enter one to eight provider links, one URL per line, in merge order. Duplicate links keep their positions but are downloaded only once per refresh.'));
-		o.rmempty = true;
-		o.rows = 5;
-		o.wrap = 'off';
-		o.monospace = true;
+		o = s.option(form.Value, 'subscription_url', _('Source subscription URL'),
+			_('Paste the link exactly as your provider gives it, including any extra query parameter your panel needs.'));
+		o.rmempty = false;
 		o.placeholder = 'https://example.com/your/subscription';
-		o.cfgvalue = function(section_id) {
-			var value = uci.get('liquid_formula', section_id, 'subscription_url');
-			if (Array.isArray(value))
-				return value.join('\n');
-			return value == null ? '' : String(value);
-		};
-		o.parse = function(section_id) {
-			var text = this.formvalue(section_id);
-			var values;
+		o.validate = function(section_id, value) {
 			var enabled = uci.get('liquid_formula', section_id, 'enabled');
-			var liveEnabled;
 			var match;
-			text = text == null ? '' : String(text);
-			values = text === '' ? [] : text.split(/\r?\n/);
 			if (this.map && typeof this.map.lookupOption === 'function') {
 				match = this.map.lookupOption('enabled', section_id);
 				if (match && match[0] && typeof match[1] === 'string')
-					liveEnabled = match[0].formvalue(match[1]);
+					enabled = match[0].formvalue(match[1]);
 			}
-			if (liveEnabled != null)
-				enabled = liveEnabled;
-			var result = validateSubscriptionList(values, String(enabled || '0') === '1');
-			if (result !== true)
-				return Promise.reject(new TypeError(result));
-			if (values.length)
-				uci.set('liquid_formula', section_id, 'subscription_url', values);
-			else
-				uci.unset('liquid_formula', section_id, 'subscription_url');
-			return Promise.resolve(values);
+			if (!value && String(enabled || '0') !== '1')
+				return true;
+			return validateSubscriptionURL(value);
 		};
 
 		o = s.option(form.Value, 'user_agent', _('Subscription User-Agent'),
 			_('Most provider panels decide what to send - sing-box JSON, Clash YAML or a base64 node list - from this header, and reject unknown or outdated clients with "client version too low". Pick a preset or type your own. The converter now decodes base64 / URI lists automatically, so a v2rayN style UA is a safe fallback when your provider has no sing-box support.'));
-		o.default = 'sing-box 1.11.0';
+		o.default = 'v2rayN/7.24.4';
 		o.rmempty = false;
-		o.placeholder = 'sing-box 1.11.0';
+		o.placeholder = 'v2rayN/7.24.4';
 		o.validate = function(section_id, value) {
 			if (!value)
 				return true;
@@ -434,24 +393,13 @@ return view.extend({
 			return true;
 		};
 		[
-			['sing-box 1.11.0',                 'sing-box ' + _('(core, recommended)')],
-			['SFI/1.11.0 (sing-box 1.11.0)',    'sing-box iOS (SFI)'],
-			['SFA/1.11.0 (sing-box 1.11.0)',    'sing-box Android (SFA)'],
-			['SFM/1.11.0 (sing-box 1.11.0)',    'sing-box macOS (SFM)'],
-			['mihomo/1.19.0',                   'mihomo (Clash.Meta)'],
-			['clash-verge/v2.0.3',              'Clash Verge Rev'],
-			['ClashforWindows/0.19.23',         'Clash for Windows'],
-			['ClashMetaForAndroid/2.11.0.Meta', 'Clash Meta for Android'],
-			['Clash/v1.18.0',                   'Clash Premium'],
-			['v2rayN/7.0.0',                    'v2rayN ' + _('(base64 node list)')],
-			['v2rayNG/1.9.16',                  'v2rayNG ' + _('(base64 node list)')],
-			['Shadowrocket/2.2.35',             'Shadowrocket'],
-			['Quantumult%20X/1.0.30',           'Quantumult X'],
-			['Surge/2900',                      'Surge'],
-			['Stash/2.7.0',                     'Stash'],
-			['Loon/3.2.0',                      'Loon'],
-			['Karing/1.0.0',                    'Karing'],
-			['NekoBox/1.3.6',                   'NekoBox for Android']
+			['v2rayN/7.24.4',                    'v2rayN ' + _('(recommended node list)')],
+			['v2rayNG/2.2.6',                    'v2rayNG ' + _('(node list)')],
+			['sing-box 1.13.15',                 'sing-box core'],
+			['SFI/1.13.15 (sing-box 1.13.15)',   'sing-box iOS (SFI)'],
+			['SFA/1.13.15 (sing-box 1.13.15)',   'sing-box Android (SFA)'],
+			['SFM/1.13.15 (sing-box 1.13.15)',   'sing-box macOS (SFM)'],
+			['Karing/1.2.23.2605',               'Karing']
 		].forEach(function(preset) { o.value(preset[0], preset[1] + ' - ' + preset[0]); });
 
 		o = s.option(form.Value, 'password', _('Converter access password'));
@@ -468,12 +416,6 @@ return view.extend({
 		o.default = '9716';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'subscription_timeout', _('Subscription source timeout'),
-			_('Seconds allowed for each real subscription source, 5 to 600. This remains one global value for all URLs.'));
-		o.datatype = 'range(5,600)';
-		o.default = '60';
-		o.rmempty = false;
-
 		o = s.option(form.Value, 'refresh_interval', _('Subscription refresh interval'), _('Minutes, 1 to 10080 (one week). This maps to subscription.refresh_interval in config.yaml.'));
 		o.datatype = 'range(1,10080)';
 		o.default = '360';
@@ -483,6 +425,9 @@ return view.extend({
 		o.rmempty = false;
 		this._defaultTemplateOption = o;
 		this._enabledTemplateIds = {};
+		this._templateSnapshot = templates;
+		// Rendering a new form invalidates any refresh still targeting the prior DOM.
+		this._templateRefreshGeneration = (this._templateRefreshGeneration || 0) + 1;
 		var seenTpl = {};
 		for (var i = 0; i < templates.length; i++) {
 			if (!templates[i].enabled)
@@ -717,29 +662,14 @@ return view.extend({
 		});
 	},
 
-	// 与 rpcd 的 worker watchdog 使用同一预算。refresh 需要覆盖首次刷新、
-	// subscription lock 等待和 manager 同步；check / update 还需覆盖临时服务
-	// 启动与最终成品下载。
+	// 与 rpcd 的 worker watchdog 使用同一预算。refresh 只发一次请求；check /
+	// update 还可能依次等待临时服务启动、刷新和拉取成品，因此是三段预算。
 	// 两边不一致会让界面在合法后台动作尚未结束时提前报告“仍在运行”。
 	actionWaitSeconds: function(name) {
-		var maxInt = 2147483647;
-		var checkedAdd = function(left, right) {
-			if (!Number.isInteger(left) || !Number.isInteger(right) ||
-			    left < 0 || right < 0 || left > maxInt - right)
-				throw new Error(_('The subscription timeout budget is invalid or too large.'));
-			return left + right;
-		};
-		var checkedMultiply = function(left, right) {
-			if (!Number.isInteger(left) || !Number.isInteger(right) ||
-			    left < 0 || right < 0 ||
-			    (right !== 0 && left > Math.floor(maxInt / right)))
-				throw new Error(_('The subscription timeout budget is invalid or too large.'));
-			return left * right;
-		};
 		var rawTimeout = String(uci.get('liquid_formula', 'main', 'subscription_timeout') || '60');
 		if (!/^(?:0|[1-9][0-9]*)$/.test(rawTimeout) ||
 		    Number(rawTimeout) < 5 || Number(rawTimeout) > 600)
-			throw new Error(_('The subscription timeout budget is invalid or too large.'));
+			return 11160;
 		var timeout = Number(rawTimeout);
 		var enabled = this._enabledTemplateCount;
 		if (typeof enabled !== 'number') {
@@ -749,22 +679,12 @@ return view.extend({
 					enabled++;
 			});
 		}
-		if (!Number.isInteger(enabled) || enabled < 0 || enabled > maxInt)
-			throw new Error(_('The subscription timeout budget is invalid or too large.'));
-		var urls = uci.get('liquid_formula', 'main', 'subscription_url');
-		if (urls == null)
-			urls = [];
-		if (!Array.isArray(urls) || urls.length > 8)
-			throw new Error(_('The subscription timeout budget is invalid or too large.'));
-		var sources = Math.max(urls.length, 1);
-		var aggregateTimeout = checkedAdd(checkedMultiply(sources, timeout), 60);
-		var requestTimeout = checkedAdd(
-			checkedAdd(aggregateTimeout, checkedMultiply(enabled, timeout)), 60);
+		var requestTimeout = Math.min(timeout * (enabled + 1) + 60, 3660);
 		if (name === 'refresh')
-			return checkedAdd(checkedMultiply(requestTimeout, 3), 90);
+			return requestTimeout + 30;
 		if (name === 'check' || name === 'update')
-			return checkedAdd(checkedMultiply(requestTimeout, 5), 300);
-		throw new Error(_('Unknown background action.'));
+			return requestTimeout * 3 + 180;
+		return 11160;
 	},
 
 	waitAction: function(name) {
@@ -823,172 +743,6 @@ return view.extend({
 
 	renderStatus: function(status) {
 		return E('div', { 'id': 'sbf_status_section', 'class': 'cbi-section' }, this.statusChildren(status));
-	},
-
-	renderSubscriptionStatus: function(subscription) {
-		subscription = (subscription && typeof subscription === 'object') ? subscription : {};
-		var state = String(subscription.overall_state || 'unavailable');
-		if ([ 'empty', 'fresh', 'degraded', 'failed', 'unavailable' ].indexOf(state) < 0)
-			state = 'unavailable';
-		var integer = function(value, minimum, maximum, fallback) {
-			return Number.isInteger(value) && value >= minimum && value <= maximum
-				? value : fallback;
-		};
-		var enumValue = function(value, allowed, fallback) {
-			value = String(value || '');
-			return allowed.indexOf(value) >= 0 ? value : fallback;
-		};
-		var failureStages = [
-			'configuration', 'current_state', 'source_fetch',
-			'source_normalize', 'aggregate', 'commit', 'deadline'
-		];
-		var failureCodes = [
-			'no_sources', 'source_unavailable', 'state_invalid',
-			'aggregate_invalid', 'commit_failed'
-		];
-		var fetchCodes = [
-			'ok', 'timeout', 'http_status', 'redirect_limit',
-			'body_too_large', 'transport', 'normalize'
-		];
-		var sourceResults = [ 'fresh', 'fallback' ];
-		var sourceFormats = [
-			'singbox-json', 'base64-uri-list', 'plain-uri-list', 'clash-yaml'
-		];
-		var warningCodes = [
-			'node_not_mapping', 'missing_field', 'invalid_field',
-			'unsupported_protocol', 'unsupported_cipher', 'unsupported_plugin',
-			'unsupported_transport', 'unsupported_tls_option',
-			'unsupported_reference', 'unsupported_encryption', 'unsupported_flow',
-			'unsupported_tuic_v4', 'unsupported_socks_tls',
-			'unsupported_hysteria2_option', 'unsupported_field', 'parse_failed',
-			'node_skipped'
-		];
-		var warningTypes = [
-			'shadowsocks', 'ss', 'vmess', 'vless', 'trojan', 'hysteria2', 'hy2',
-			'tuic', 'anytls', 'socks', 'socks5', 'ssr', 'wireguard', 'direct',
-			'block', 'unknown'
-		];
-		var warningFields = [
-			'document', 'outbounds', 'proxies', 'name', 'tag', 'type', 'server',
-			'port', 'dialer-proxy', 'udp', 'cipher', 'plugin', 'uuid', 'alterId',
-			'encryption', 'flow', 'password', 'token', 'tls', 'sni', 'servername',
-			'fingerprint', 'client-fingerprint', 'alpn', 'reality-opts',
-			'public-key', 'short-id', 'network', 'transport', 'ws-opts',
-			'grpc-opts', 'http-opts', 'grpc-user-agent', 'ss-opts', 'obfs',
-			'realm', 'ports', 'hop-interval', 'username', 'references',
-			'alter-id', 'auth', 'h2-opts', 'quic-opts', 'path', 'host', 'headers',
-			'method', 'service-name', 'max-early-data', 'early-data-header-name',
-			'congestion-controller', 'congestion_control', 'udp-relay-mode',
-			'udp_relay_mode', 'field'
-		];
-		var total = integer(subscription.total_sources, 0, 8, 0);
-		var fresh = integer(subscription.fresh_count, 0, total, 0);
-		var active = /^[0-9a-f]{64}$/.test(String(subscription.active_generation || ''))
-			? String(subscription.active_generation) : '';
-		var fallback = Array.isArray(subscription.fallback_indices)
-			? subscription.fallback_indices.filter(function(index, offset, values) {
-				return Number.isInteger(index) && index >= 1 && index <= total &&
-					values.indexOf(index) === offset;
-			}).slice(0, 8) : [];
-		var sourceText = fallback.length ? fallback.join(', ') : '-';
-		var summaryClass = 'alert-message';
-		var summary;
-		if (state === 'fresh') {
-			summaryClass += ' success';
-			summary = _('All %d subscription sources are fresh.').format(total);
-		} else if (state === 'degraded') {
-			summaryClass += ' warning';
-			summary = _('Degraded: cached data is used for source indices %s.').format(sourceText);
-		} else if (state === 'failed') {
-			var attempt = (subscription.last_attempt && typeof subscription.last_attempt === 'object')
-				? subscription.last_attempt : {};
-			var failedIndex = integer(attempt.source_index, 0, total, 0);
-			var stage = enumValue(attempt.failure_stage, failureStages, 'current_state');
-			var code = enumValue(attempt.code, failureCodes, 'state_invalid');
-			var fetchCode = enumValue(attempt.fetch_code, fetchCodes, '');
-			summaryClass += ' warning';
-			summary = failedIndex > 0
-				? _('Subscription refresh failed at source %d (%s: %s%s).').format(
-					failedIndex, stage, code, fetchCode ? '/' + fetchCode : '')
-				: _('Subscription refresh failed (%s: %s).').format(stage, code);
-			summary += attempt.preserved
-				? ' ' + _('The previous complete generation was preserved.')
-				: ' ' + _('No previous complete generation was available.');
-		} else if (state === 'empty') {
-			summaryClass += ' notice';
-			summary = total > 0
-				? _('No subscription generation has been selected for the saved configuration yet.')
-				: _('No subscription source is configured.');
-		} else {
-			summaryClass += ' warning';
-			summary = _('Subscription status is unavailable. The selected metadata could not be validated.');
-		}
-
-		var children = [
-			E('h4', {}, [ _('Subscription State') ]),
-			E('div', { 'class': summaryClass }, [ summary ]),
-			E('p', { 'class': 'cbi-value-description' }, [
-				_('Sources: '), String(total),
-				' / ', _('Fresh: '), String(fresh),
-				' / ', _('Fallback indices: '), sourceText,
-				' / ', _('Active generation: '),
-				E('code', {}, [ active || '-' ])
-			])
-		];
-		if (active && !subscription.config_match)
-			children.push(E('div', { 'class': 'alert-message warning' }, [
-				_('The selected generation belongs to a different saved configuration; refresh the subscription before using it.')
-			]));
-
-		var sources = Array.isArray(subscription.sources)
-			? subscription.sources.slice(0, 8) : [];
-		if (sources.length) {
-			var rows = sources.map(function(source) {
-				source = (source && typeof source === 'object') ? source : {};
-				var index = integer(source.index, 1, 8, 0);
-				var accepted = integer(source.accepted, 0, 8192, 0);
-				var skipped = integer(source.skipped, 0, 131072, 0);
-				var warnings = Array.isArray(source.warnings)
-					? source.warnings.slice(0, 8) : [];
-				var warningText = warnings.map(function(warning) {
-					warning = (warning && typeof warning === 'object') ? warning : {};
-					var nodeIndex = integer(warning.node_index, 1, 131072, 0);
-					var warningCode = enumValue(warning.code, warningCodes, 'node_skipped');
-					var warningType = enumValue(warning.type, warningTypes, 'unknown');
-					var warningField = enumValue(warning.field, warningFields, 'field');
-					return '#' + String(nodeIndex || '?') + ' ' +
-						warningCode + ' (' + warningType + '/' + warningField + ')';
-				}).join('; ');
-				var result = enumValue(source.result, sourceResults, '-');
-				var fetch = enumValue(source.fetch_code, fetchCodes, '-');
-				var format = enumValue(source.format, sourceFormats, '-');
-				return E('tr', { 'class': 'tr cbi-section-table-row' }, [
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Source') }, [ String(index || '?') ]),
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Result') }, [ result ]),
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Fetch') }, [ fetch ]),
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Format') }, [ format ]),
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Accepted / skipped') }, [ String(accepted) + ' / ' + String(skipped) ]),
-					E('td', { 'class': 'td cbi-section-table-cell', 'data-title': _('Warnings') }, [ warningText || '-' ])
-				]);
-			});
-			children.push(E('table', { 'class': 'table cbi-section-table' }, [
-				E('thead', { 'class': 'thead cbi-section-thead' }, [
-					E('tr', { 'class': 'tr cbi-section-table-titles' }, [
-						E('th', { 'class': 'th' }, [ _('Source') ]),
-						E('th', { 'class': 'th' }, [ _('Result') ]),
-						E('th', { 'class': 'th' }, [ _('Fetch') ]),
-						E('th', { 'class': 'th' }, [ _('Format') ]),
-						E('th', { 'class': 'th' }, [ _('Accepted / skipped') ]),
-						E('th', { 'class': 'th' }, [ _('Warnings') ])
-					])
-				]),
-				E('tbody', { 'class': 'tbody cbi-section-tbody' }, rows)
-			]));
-		}
-		return E('div', {
-			'id': 'sbf_subscription_status',
-			'class': 'cbi-section'
-		}, children);
 	},
 
 	statusChildren: function(status) {
@@ -1057,7 +811,6 @@ return view.extend({
 				_('The converter is started and stopped by the Enable converter service switch above (Save & Apply); when settings change it is restarted automatically so they take effect. '),
 				_('Refresh, Check and Update run in the background: progress appears in the update log below and a message pops up when they finish. Refresh needs the converter already running. Check and Update will start it temporarily if it is off and stop it again when they finish, so the master switch is left as you set it. Update output file only writes the generated JSON; it does not restart sing-box. This card refreshes automatically.')
 			]),
-			this.renderSubscriptionStatus(status.subscription),
 			E('h4', {}, _('Health Check')),
 			E('pre', { 'style': 'white-space:pre-wrap; max-height: 180px; overflow:auto' }, [ health ]),
 			E('h4', {}, _('Recent Update Log')),
@@ -1131,9 +884,8 @@ return view.extend({
 		var currentValue;
 		var i, optionNodes;
 
-		// A refresh is all-or-nothing: never leave the table and ListValue
-		// displaying different snapshots just because one rendered target went
-		// away while an RPC request was in flight.
+		// A refresh is all-or-nothing. If either live target disappeared while the
+		// request was in flight, keep the existing table and control unchanged.
 		if (!tbody || !select)
 			throw new Error(_('The template list is no longer available.'));
 		currentValue = String(select.value || '');
@@ -1154,7 +906,7 @@ return view.extend({
 				hidden: true
 			});
 
-		// Create every native option before changing either rendered structure.
+		// Build every row and native option before changing either rendered target.
 		// ui.Select has no public setChoices API in supported LuCI versions.
 		optionNodes = displayChoices.map(function(choice) {
 			var node = document.createElement('option');
@@ -1181,8 +933,8 @@ return view.extend({
 	commitTemplateRefresh: function(staged) {
 		var i, option = this._defaultTemplateOption;
 
-		// Keep LuCI's option model aligned with the live native control. No UCI
-		// write or synthetic change event is needed for a display-only refresh.
+		// Synchronize LuCI's model and both native structures without writing UCI
+		// or emitting a change event, so unrelated unsaved form values survive.
 		if (option) {
 			option.keylist = staged.keylist;
 			option.vallist = staged.vallist;
@@ -1199,29 +951,34 @@ return view.extend({
 			staged.select.removeChild(staged.select.firstChild);
 		for (i = 0; i < staged.optionNodes.length; i++)
 			staged.select.appendChild(staged.optionNodes[i]);
-		// Native browsers maintain HTMLSelectElement.options themselves. The
+		// Native browsers maintain HTMLSelectElement.options themselves; the
 		// lightweight render fixture exposes it as a plain array instead.
 		if (Array.isArray(staged.select.options))
 			staged.select.options = staged.optionNodes;
 		staged.select.value = staged.currentValue;
 		this._defaultTemplateSelect = staged.select;
-		// Recompute LuCI's cached validation state after updating the enabled set.
-		// This is display validation only; it does not write UCI or fire change.
 		if (option && typeof option.triggerValidation === 'function')
 			option.triggerValidation('main');
 	},
 
-	// Re-fetch the authoritative template list and synchronously commit a fully
-	// staged table/dropdown snapshot. Rejections intentionally propagate so the
-	// mutation caller can report that the backend write succeeded but UI refresh
-	// did not.
+	// Only the newest request may commit. Rejections from the active request
+	// propagate to the mutation caller so a successful write and failed UI
+	// refresh are reported as distinct outcomes.
 	reloadTemplateList: function() {
 		var self = this;
+		var generation = (this._templateRefreshGeneration || 0) + 1;
+		this._templateRefreshGeneration = generation;
 		return callListTemplates().then(function(res) {
+			if (generation !== self._templateRefreshGeneration)
+				return self._templateSnapshot || [];
 			var templates = templateSnapshot(res);
 			var staged = self.stageTemplateRefresh(templates);
 			self.commitTemplateRefresh(staged);
 			return templates;
+		}, function(err) {
+			if (generation !== self._templateRefreshGeneration)
+				return self._templateSnapshot || [];
+			throw err;
 		});
 	},
 

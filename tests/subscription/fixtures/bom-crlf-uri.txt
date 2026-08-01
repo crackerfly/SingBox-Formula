@@ -1,2 +1,0 @@
-﻿ss://YWVzLTEyOC1nY206Ym9tLXBhc3N3b3Jk@192.0.2.32:8388#BOM-CRLF
-socks5://bom-user:bom-socks-password@bom-socks.example:1080#BOM-SOCKS

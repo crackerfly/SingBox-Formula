@@ -6,6 +6,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 DPI_DIR="$REPO_ROOT/openwrt-feed/liquid-formula"
 MAKEFILE="$DPI_DIR/Makefile"
+ROOT_MOMO_TEMPLATE="$REPO_ROOT/momo-template.json"
+PACKAGED_MOMO_TEMPLATE="$DPI_DIR/files/www/liquid-formula/templates/momo-template.json"
+PACKAGED_LOCALDNS_TEMPLATE="$DPI_DIR/files/www/liquid-formula/templates/localdns-template.json"
+ROOT_MOMO_TEMPLATE_SHA256=748745145195b8def355b138e477bc5451902b3902c6f90094c15d4801209f17
+PACKAGED_MOMO_TEMPLATE_SHA256=ac1648ec562b7d8e23407baeea758f3788889054f6c1bca56220534077c715c3
+PACKAGED_LOCALDNS_TEMPLATE_SHA256=9dc80b9caf2eba67ca4b542c480a10a3f88ef8082903a3c10f31a141b1b0fbdf
+CONVERTER_SOURCE_TREE=d4f299087af3fdb87f7728846425d48edfeb7ae4
+DPI_SOURCE_TREE=4b609c3936b77563b1e845c4c39dbeb7628a5204
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-dpi-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -14,6 +22,28 @@ trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
 assert_file_exists "$MAKEFILE" "DPI package Makefile exists"
 WAN_RESOLVER="$DPI_DIR/files/usr/share/liquid-formula-dpi/wan-resolver.sh"
+
+# --- authoritative template and archived-source boundaries ------------------
+
+assert_file_sha256 \
+	"$ROOT_MOMO_TEMPLATE_SHA256" \
+	"$ROOT_MOMO_TEMPLATE" \
+	"keeps the archived root momo template byte-exact"
+assert_file_sha256 \
+	"$PACKAGED_MOMO_TEMPLATE_SHA256" \
+	"$PACKAGED_MOMO_TEMPLATE" \
+	"ships the authoritative momo template at its packaged path"
+assert_file_sha256 \
+	"$PACKAGED_LOCALDNS_TEMPLATE_SHA256" \
+	"$PACKAGED_LOCALDNS_TEMPLATE" \
+	"ships the authoritative local DNS template at its packaged path"
+
+converter_source_tree=$(git -C "$REPO_ROOT" rev-parse HEAD:openwrt-feed/liquid-formula/src 2>/dev/null || true)
+dpi_source_tree=$(git -C "$REPO_ROOT" rev-parse HEAD:openwrt-feed/liquid-formula/src-dpi 2>/dev/null || true)
+assert_equal "$CONVERTER_SOURCE_TREE" "$converter_source_tree" \
+	"keeps the archived converter source tree unchanged"
+assert_equal "$DPI_SOURCE_TREE" "$dpi_source_tree" \
+	"keeps the archived third-party DPI source trees unchanged"
 
 # --- vendored sources are present and buildable from source ------------------
 
@@ -127,6 +157,14 @@ assert_make_top_level_not_contains "$MAKEFILE" '@TARGET_' \
 	"the merged package is not pinned to a single OpenWrt target"
 assert_contains "$MAKEFILE" 'kmod-nft-queue' "the merged package depends on the NFQUEUE kernel module"
 assert_contains "$MAKEFILE" 'libnetfilter-queue' "the merged package depends on libnetfilter-queue"
+assert_make_block_contains "$MAKEFILE" \
+	'Package/liquid-formula/install' \
+	'momo-template\.json.*momo-template\.json' \
+	"installs the authoritative momo template"
+assert_make_block_contains "$MAKEFILE" \
+	'Package/liquid-formula/install' \
+	'localdns-template\.json.*localdns-template\.json' \
+	"installs the authoritative local DNS template"
 
 # WAN auto-detection is a packaged runtime helper, not test-only logic. It is
 # installed executable because both init scripts and hotplug source it on a

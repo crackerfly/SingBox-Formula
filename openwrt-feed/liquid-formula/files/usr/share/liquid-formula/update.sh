@@ -15,19 +15,11 @@ LOG=${SBF_LOG_FILE:-/var/log/liquid-formula/update.log}
 LOCK_DIR=${SBF_LOCK_DIR:-/var/run/liquid-formula/update.lock}
 LIFECYCLE_LOCK_DIR=${SBF_LIFECYCLE_LOCK_DIR:-/var/run/liquid-formula/lifecycle.lock}
 TMP_ROOT=${SBF_TMP_ROOT:-${TMPDIR:-/tmp}}
-GENERATED_CONFIG=${SBF_GENERATED_CONFIG:-/etc/liquid-formula/config.yaml}
-SUBSCRIPTION_STATE=/var/lib/liquid-formula/subscriptions
-CURRENT_FILE=$SUBSCRIPTION_STATE/current
-SUBSCRIPTION_LOCK_FILE=${SBF_SUBSCRIPTION_LOCK_FILE:-/var/run/liquid-formula/subscription.lock}
-SUBSCRIPTION_BARRIER_FILE=${SBF_SUBSCRIPTION_BARRIER_FILE:-${SUBSCRIPTION_LOCK_FILE}.barrier}
-FAULT_HOOK=${SBF_TEST_FAULT_HOOK:-}
 LOG_LIMIT=262144
 
 WORK_DIR=
 OUTPUT_STAGE=
 STARTED_CONVERTER=0
-RESTORE_AT_REST_CONFIG=0
-SERVICE_ENABLED=0
 BACKUP_STAGE=
 CLAIM_FILE=
 LOCK_HELD=0
@@ -36,23 +28,8 @@ LOCK_PID=
 LOCK_START=
 LIFECYCLE_LOCK_HELD=0
 LIFECYCLE_TOKEN=
-SUBSCRIPTION_LOCK_HELD=0
-SUBSCRIPTION_LOCK_ID=
-SUBSCRIPTION_BARRIER_ACTIVE=0
-SUBSCRIPTION_BARRIER_ID=
-SUBSCRIPTION_BARRIER_CLAIM=
 
 LOG_READY=0
-CHECKED_RESULT=0
-SUBSCRIPTION_URL_COUNT=0
-ENABLED_TEMPLATE_COUNT=0
-CONFIG_DIGEST=
-GENERATION_BEFORE_REFRESH=
-VALIDATED_GENERATION=
-VALIDATED_AGGREGATE_SHA=
-PINNED_GENERATION=
-PINNED_AGGREGATE_SHA=
-CACHE_NODE=
 
 # 这些错误在 rpcd 后台执行时 stderr 会被丢弃, 所以日志一就绪就同时落盘,
 # 否则界面提示“见 update log”而那个文件根本不存在。
@@ -367,214 +344,8 @@ release_lifecycle_lock() {
 	LIFECYCLE_TOKEN=
 }
 
-subscription_lock_fd_identity() {
-	stat -Lc '%d:%i:%u:%a:%h' /proc/self/fd/8 2>/dev/null
-}
-
-subscription_lock_path_identity() {
-	[ -f "$SUBSCRIPTION_LOCK_FILE" ] &&
-		[ ! -L "$SUBSCRIPTION_LOCK_FILE" ] || return 1
-	stat -c '%d:%i:%u:%a:%h' "$SUBSCRIPTION_LOCK_FILE" 2>/dev/null
-}
-
-monotonic_seconds() {
-	local uptime remainder
-	IFS=' ' read -r uptime remainder < /proc/uptime || return 1
-	uptime=${uptime%%.*}
-	uint_between "$uptime" 0 2147483647 || return 1
-	printf '%s\n' "$uptime"
-}
-
-acquire_subscription_lock() {
-	local parent wait_limit started now fd_identity path_identity
-	command -v flock >/dev/null 2>&1 || {
-		log "flock is unavailable for subscription snapshot binding" || true
-		return 1
-	}
-	parent=$(dirname "$SUBSCRIPTION_LOCK_FILE") || return 1
-	mkdir -p "$parent" || return 1
-	[ -d "$parent" ] && [ ! -L "$parent" ] || {
-		log "subscription lock parent is unsafe" || true
-		return 1
-	}
-	if [ -e "$SUBSCRIPTION_LOCK_FILE" ] || [ -L "$SUBSCRIPTION_LOCK_FILE" ]; then
-		[ -f "$SUBSCRIPTION_LOCK_FILE" ] && [ ! -L "$SUBSCRIPTION_LOCK_FILE" ] || {
-			log "subscription lock path is unsafe" || true
-			return 1
-		}
-	else
-		: > "$SUBSCRIPTION_LOCK_FILE" || return 1
-	fi
-	chmod 0600 "$SUBSCRIPTION_LOCK_FILE" || return 1
-	exec 8<> "$SUBSCRIPTION_LOCK_FILE" || return 1
-
-	fd_identity=$(subscription_lock_fd_identity) || {
-		exec 8>&-
-		log "cannot inspect the opened subscription lock" || true
-		return 1
-	}
-	case "$fd_identity" in *:600:1) ;; *)
-		exec 8>&-
-		log "opened subscription lock metadata is unsafe" || true
-		return 1
-		;;
-	esac
-
-	wait_limit=${SBF_SUBSCRIPTION_LOCK_WAIT_LIMIT:-$request_timeout}
-	uint_between "$wait_limit" 1 "$request_timeout" || {
-		exec 8>&-
-		log "invalid subscription lock wait limit" || true
-		return 1
-	}
-	started=$(monotonic_seconds) || {
-		exec 8>&-
-		log "cannot read the monotonic clock for subscription locking" || true
-		return 1
-	}
-	while ! flock -n -x 8; do
-		now=$(monotonic_seconds) || {
-			exec 8>&-
-			log "cannot read the monotonic clock for subscription locking" || true
-			return 1
-		}
-		[ $((now - started)) -lt "$wait_limit" ] || {
-			exec 8>&-
-			log "timed out waiting for the subscription generation lock" || true
-			return 1
-		}
-		sleep 1
-	done
-
-	path_identity=$(subscription_lock_path_identity) || {
-		flock -u 8 >/dev/null 2>&1 || true
-		exec 8>&-
-		log "subscription lock changed while acquiring it" || true
-		return 1
-	}
-	[ "$path_identity" = "$fd_identity" ] || {
-		flock -u 8 >/dev/null 2>&1 || true
-		exec 8>&-
-		log "subscription lock identity changed while acquiring it" || true
-		return 1
-	}
-	SUBSCRIPTION_LOCK_ID=$fd_identity
-	SUBSCRIPTION_LOCK_HELD=1
-	return 0
-}
-
-subscription_file_identity() {
-	stat -c '%d:%i:%u:%a:%h:%s' "$1" 2>/dev/null
-}
-
-activate_subscription_barrier() {
-	local parent lock_parent claim identity lock_identity lock_uid marker_uid marker_mode
-
-	[ "$SUBSCRIPTION_LOCK_HELD" = 1 ] || return 1
-	lock_identity=$(subscription_lock_path_identity) || return 1
-	[ "$lock_identity" = "$SUBSCRIPTION_LOCK_ID" ] || {
-		log "subscription lock identity changed before synchronization" || true
-		return 1
-	}
-	parent=$(dirname "$SUBSCRIPTION_BARRIER_FILE") || return 1
-	lock_parent=$(dirname "$SUBSCRIPTION_LOCK_FILE") || return 1
-	[ "$parent" = "$lock_parent" ] || {
-		log "subscription barrier must share the lock directory" || true
-		return 1
-	}
-	[ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-	lock_uid=$(stat -c '%u' "$SUBSCRIPTION_LOCK_FILE" 2>/dev/null) || return 1
-	if [ -e "$SUBSCRIPTION_BARRIER_FILE" ] ||
-	   [ -L "$SUBSCRIPTION_BARRIER_FILE" ]; then
-		[ -f "$SUBSCRIPTION_BARRIER_FILE" ] &&
-			[ ! -L "$SUBSCRIPTION_BARRIER_FILE" ] || {
-			log "subscription barrier path is unsafe" || true
-			return 1
-		}
-		marker_mode=$(stat -c '%a:%h:%s' "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null) ||
-			return 1
-		marker_uid=$(stat -c '%u' "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null) ||
-			return 1
-		[ "$lock_uid" = "$marker_uid" ] &&
-			[ "$marker_mode" = 600:1:3 ] &&
-			[ "$(cat "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null)" = v1 ] || {
-			log "subscription barrier path contains invalid stale state" || true
-			return 1
-		}
-		rm -f "$SUBSCRIPTION_BARRIER_FILE" || return 1
-	fi
-
-	claim=$(mktemp "$parent/.subscription.barrier.XXXXXX") || return 1
-	SUBSCRIPTION_BARRIER_CLAIM=$claim
-	printf 'v1\n' > "$claim" || return 1
-	chmod 0600 "$claim" || return 1
-	mv "$claim" "$SUBSCRIPTION_BARRIER_FILE" || return 1
-	SUBSCRIPTION_BARRIER_CLAIM=
-	[ -f "$SUBSCRIPTION_BARRIER_FILE" ] &&
-		[ ! -L "$SUBSCRIPTION_BARRIER_FILE" ] || {
-			rm -f "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null || true
-			return 1
-		}
-	identity=$(subscription_file_identity "$SUBSCRIPTION_BARRIER_FILE") || {
-		rm -f "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null || true
-		return 1
-	}
-	SUBSCRIPTION_BARRIER_ID=$identity
-	SUBSCRIPTION_BARRIER_ACTIVE=1
-	marker_uid=$(stat -c '%u' "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null) || {
-		remove_subscription_barrier >/dev/null 2>&1 || true
-		return 1
-	}
-	marker_mode=$(stat -c '%a:%h:%s' "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null) ||
-		{ remove_subscription_barrier >/dev/null 2>&1 || true; return 1; }
-	[ "$lock_uid" = "$marker_uid" ] && [ "$marker_mode" = 600:1:3 ] ||
-		{ remove_subscription_barrier >/dev/null 2>&1 || true; return 1; }
-	[ "$(cat "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null)" = v1 ] ||
-		{ remove_subscription_barrier >/dev/null 2>&1 || true; return 1; }
-	lock_identity=$(subscription_lock_path_identity) || {
-		remove_subscription_barrier >/dev/null 2>&1 || true
-		return 1
-	}
-	[ "$lock_identity" = "$SUBSCRIPTION_LOCK_ID" ] || {
-		remove_subscription_barrier >/dev/null 2>&1 || true
-		log "subscription lock identity changed during synchronization setup" || true
-		return 1
-	}
-}
-
-remove_subscription_barrier() {
-	local identity
-
-	[ "$SUBSCRIPTION_BARRIER_ACTIVE" = 1 ] || {
-		[ -z "$SUBSCRIPTION_BARRIER_CLAIM" ] ||
-			rm -f "$SUBSCRIPTION_BARRIER_CLAIM" 2>/dev/null || true
-		SUBSCRIPTION_BARRIER_CLAIM=
-		return 0
-	}
-	identity=$(subscription_file_identity "$SUBSCRIPTION_BARRIER_FILE" 2>/dev/null) ||
-		return 1
-	[ "$identity" = "$SUBSCRIPTION_BARRIER_ID" ] || return 1
-	rm -f "$SUBSCRIPTION_BARRIER_FILE" || return 1
-	SUBSCRIPTION_BARRIER_ACTIVE=0
-	SUBSCRIPTION_BARRIER_ID=
-}
-
-release_subscription_lock() {
-	local result=0
-	[ "$SUBSCRIPTION_LOCK_HELD" = 1 ] || return 0
-	remove_subscription_barrier || result=1
-	flock -u 8 >/dev/null 2>&1 || true
-	exec 8>&-
-	SUBSCRIPTION_LOCK_HELD=0
-	SUBSCRIPTION_LOCK_ID=
-	return "$result"
-}
-
 cleanup() {
 	local original_rc="${1:-0}" cleanup_failed=0
-	release_subscription_lock || {
-		plain_error "failed to remove the subscription synchronization barrier"
-		cleanup_failed=1
-	}
 	# Check / Update 允许在服务关着的时候临时把转换器拉起来跑一次。既然是临时
 	# 的就必须还原, 否则界面会停在 "Autostart: Off / Status: Running", 而用户
 	# 从没打开过这个服务。
@@ -587,25 +358,10 @@ cleanup() {
 			cleanup_failed=1
 		fi
 	fi
-	# Manual Check / Update intentionally generates a private runtime config even
-	# while the service is disabled. Restore the scrubbed at-rest form whenever
-	# no converter is running, including a start failure before temporary
-	# ownership could be recorded.
-	if [ "${RESTORE_AT_REST_CONFIG:-0}" = 1 ]; then
-		RESTORE_AT_REST_CONFIG=0
-		if SBF_INCLUDE_DISABLED_URLS=0 "$GEN" >/dev/null; then
-			log "restored the scrubbed on-disk converter config after the manual run" || true
-		else
-			plain_error "failed to restore the at-rest converter config after the manual run"
-			cleanup_failed=1
-		fi
-	fi
 	release_lifecycle_lock
 	[ -n "$OUTPUT_STAGE" ] && rm -f "$OUTPUT_STAGE"
 	[ -n "$BACKUP_STAGE" ] && rm -f "$BACKUP_STAGE"
 	[ -n "$CLAIM_FILE" ] && rm -f "$CLAIM_FILE"
-	[ -n "$SUBSCRIPTION_BARRIER_CLAIM" ] &&
-		rm -f "$SUBSCRIPTION_BARRIER_CLAIM" 2>/dev/null || true
 	[ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
 	release_lock
 	[ "$original_rc" -ne 0 ] || [ "$cleanup_failed" = 0 ] || original_rc=1
@@ -679,180 +435,9 @@ valid_scalar() {
 	! printf '%s' "$1" | LC_ALL=C grep -q '[[:cntrl:]]'
 }
 
-valid_ipv6_literal() {
-	printf '%s\n' "$1" | LC_ALL=C awk '
-	function valid_decimal(part) {
-		return part ~ /^[0-9]+$/ &&
-			(length(part) == 1 || substr(part, 1, 1) != "0") &&
-			part + 0 <= 255
-	}
-	function valid_ipv4(value, octets, count, idx) {
-		count = split(value, octets, ".")
-		if (count != 4)
-			return 0
-		for (idx = 1; idx <= count; idx++)
-			if (!valid_decimal(octets[idx]))
-				return 0
-		return 1
-	}
-	function valid_ipv6(value, zone_at, zone, compression, left, right,
-			groups, temporary, count, idx, part, units) {
-		zone_at = index(value, "%25")
-		if (zone_at > 0) {
-			zone = substr(value, zone_at + 3)
-			if (zone == "" || index(zone, "%") > 0)
-				return 0
-			value = substr(value, 1, zone_at - 1)
-		}
-		if (index(value, "%") > 0 || index(value, ":") == 0 ||
-				index(value, ":::") > 0)
-			return 0
-		compression = index(value, "::")
-		if (compression > 0) {
-			left = substr(value, 1, compression - 1)
-			right = substr(value, compression + 2)
-			if (index(right, "::") > 0)
-				return 0
-		} else {
-			left = value
-			right = ""
-		}
-		count = 0
-		if (left != "") {
-			part = split(left, temporary, ":")
-			for (idx = 1; idx <= part; idx++)
-				groups[++count] = temporary[idx]
-		}
-		if (right != "") {
-			part = split(right, temporary, ":")
-			for (idx = 1; idx <= part; idx++)
-				groups[++count] = temporary[idx]
-		}
-		units = 0
-		for (idx = 1; idx <= count; idx++) {
-			part = groups[idx]
-			if (index(part, ".") > 0) {
-				if (idx != count || !valid_ipv4(part))
-					return 0
-				units += 2
-			} else {
-				if (length(part) < 1 || length(part) > 4 ||
-						part !~ /^[0-9A-Fa-f]+$/)
-					return 0
-				units++
-			}
-		}
-		return compression > 0 ? units < 8 : units == 8
-	}
-	{ exit(valid_ipv6($0) ? 0 : 1) }
-	'
-}
-
 valid_http_url() {
-	local url="$1" rest authority userinfo hostport hostname suffix port escaped
-	local before_query fragment percent_part host_escaped
-	[ -n "$url" ] || return 1
-	# Match net/url's raw-byte boundary: no ASCII space, C0 control, or DEL.
-	! printf '%s' "$url" | LC_ALL=C grep -q '[[:cntrl:] ]' || return 1
-	case "$url" in
-		[Hh][Tt][Tt][Pp]://?*|[Hh][Tt][Tt][Pp][Ss]://?*) ;;
-		*) return 1 ;;
-	esac
-	# net/url decodes authority/path/fragment and rejects malformed escapes
-	# there; RawQuery remains opaque until a caller explicitly decodes it.
-	before_query=${url%%\?*}
-	fragment=
-	case "$url" in *#*) fragment=${url#*#} ;; esac
-	for percent_part in "$before_query" "$fragment"; do
-		escaped=$percent_part
-		while [ "${escaped#*%}" != "$escaped" ]; do
-			escaped=${escaped#*%}
-			case "$escaped" in
-				[0-9A-Fa-f][0-9A-Fa-f]*) escaped=${escaped#??} ;;
-				*) return 1 ;;
-			esac
-		done
-	done
-	rest=${url#*://}
-	authority=${rest%%[/?#]*}
-	[ -n "$authority" ] || return 1
-	userinfo=
-	case "$authority" in
-		*@*)
-			userinfo=${authority%@*}
-			case "$userinfo" in
-				*'"'*|*'<'*|*'>'*|*'\'*|*'^'*|*'`'*|*'{'*|*'|'*|*'}'*|*'['*|*']'*|*@*) return 1 ;;
-			esac
-			;;
-	esac
-	hostport=${authority##*@}
-	[ -n "$hostport" ] || return 1
-	case "$hostport" in
-		\[* )
-			case "$hostport" in *\]*) ;; *) return 1 ;; esac
-			hostname=${hostport#\[}
-			hostname=${hostname%%\]*}
-			[ -n "$hostname" ] || return 1
-			valid_ipv6_literal "$hostname" || return 1
-			suffix=${hostport#*\]}
-			case "$suffix" in
-				'') ;;
-				:*)
-					port=${suffix#:}
-					case "$port" in *[!0-9]*) return 1 ;; esac
-					;;
-				*) return 1 ;;
-			esac
-			;;
-		*\]*) return 1 ;;
-		*)
-			case "$hostport" in
-				*:*)
-					hostname=${hostport%%:*}
-					port=${hostport#*:}
-					case "$port" in *[!0-9]*) return 1 ;; esac
-					;;
-				*) hostname=$hostport ;;
-			esac
-			[ -n "$hostname" ] || return 1
-			case "$hostname" in *[\[\]]*) return 1 ;; esac
-			;;
-	esac
-	case "$hostname" in
-		*'"'*|*'<'*|*'>'*|*'\'*|*'^'*|*'`'*|*'{'*|*'|'*|*'}'*|*'['*|*']'*) return 1 ;;
-	esac
-	# net/url forbids percent-encoding ASCII bytes in a host, except %25
-	# which introduces an RFC 6874 IPv6 zone identifier.
-	host_escaped=$hostname
-	while [ "${host_escaped#*%}" != "$host_escaped" ]; do
-		host_escaped=${host_escaped#*%}
-		case "$host_escaped" in
-			25*) ;;
-			[0-7][0-9A-Fa-f]*) return 1 ;;
-		esac
-		host_escaped=${host_escaped#??}
-	done
-	return 0
-}
-
-checked_add_int32() {
-	local left="$1" right="$2"
-	uint_between "$left" 0 2147483647 || return 1
-	uint_between "$right" 0 2147483647 || return 1
-	[ "$left" -le $((2147483647 - right)) ] || return 1
-	CHECKED_RESULT=$((left + right))
-}
-
-checked_multiply_int32() {
-	local left="$1" right="$2"
-	uint_between "$left" 0 2147483647 || return 1
-	uint_between "$right" 0 2147483647 || return 1
-	if [ "$left" -eq 0 ] || [ "$right" -eq 0 ]; then
-		CHECKED_RESULT=0
-		return 0
-	fi
-	[ "$left" -le $((2147483647 / right)) ] || return 1
-	CHECKED_RESULT=$((left * right))
+	valid_scalar "$1" || return 1
+	case "$1" in http://?*|https://?*) return 0 ;; *) return 1 ;; esac
 }
 
 urlencode() {
@@ -871,33 +456,20 @@ urlencode() {
 count_enabled_template() {
 	local sid="$1" tpl_enabled
 	config_get_bool tpl_enabled "$sid" enabled 1
-	[ "$tpl_enabled" != 1 ] || {
-		checked_add_int32 "$ENABLED_TEMPLATE_COUNT" 1 || return 1
-		ENABLED_TEMPLATE_COUNT=$CHECKED_RESULT
-	}
+	[ "$tpl_enabled" != 1 ] || ENABLED_TEMPLATE_COUNT=$((ENABLED_TEMPLATE_COUNT + 1))
 	return 0
 }
 
-count_subscription_url() {
-	local value="$1"
-	[ -n "$value" ] && valid_http_url "$value" || return 1
-	checked_add_int32 "$SUBSCRIPTION_URL_COUNT" 1 || return 1
-	SUBSCRIPTION_URL_COUNT=$CHECKED_RESULT
-	[ "$SUBSCRIPTION_URL_COUNT" -le 8 ]
-}
-
 load_cfg() {
-	local source_budget aggregate_timeout template_budget
 	config_load "$CONFIG" || {
 		log "failed to load UCI config $CONFIG"
 		return 1
 	}
 	config_get port main port '9716'
-	config_get_bool SERVICE_ENABLED main enabled 0
 	config_get password main password '890716'
+	config_get sub_url main subscription_url ''
 	config_get sub_timeout main subscription_timeout '60'
 	config_get default_template main default_template 'momo_template'
-	config_get cache_dir main cache_dir '/var/lib/liquid-formula/cache'
 	config_get output_config main output_config '/etc/momo/profiles/config.json'
 	uint_between "$port" 1 65535 || {
 		log "invalid port"
@@ -911,240 +483,29 @@ load_cfg() {
 		log "password or default_template contains a control character"
 		return 1
 	}
-	valid_scalar "$cache_dir" || {
-		log "cache_dir contains a control character"
-		return 1
-	}
-	case "$cache_dir" in
-		/*) ;;
-		*)
-			log "cache_dir must be absolute"
-			return 1
-			;;
-	esac
-	CACHE_NODE=${cache_dir%/}/node.json
 	[ -n "$password" ] || {
 		log "password must not be empty"
 		return 1
 	}
-	SUBSCRIPTION_URL_COUNT=0
-	config_list_foreach main subscription_url count_subscription_url || {
-		log "subscription_url must contain one to eight HTTP or HTTPS URLs"
-		return 1
-	}
-	if [ "$SUBSCRIPTION_URL_COUNT" -eq 0 ]; then
-		if [ "$cmd" != generate ] || [ "$SERVICE_ENABLED" = 1 ]; then
-			log "at least one subscription_url is required"
-			return 1
-		fi
-	fi
-
+	# 一次刷新在服务端是串行的: 节点 + 每个启用的模板, 每段各自受
+	# subscription_timeout 约束。generate-config.sh 因此把服务端的 write_timeout
+	# 定为 sub_timeout*(启用模板数+1)+30。客户端必须比它等得久, 否则默认配置
+	# (一个模板、60 秒)下服务端有 150 秒预算而客户端 120 秒就放弃了 —— 界面会
+	# 报失败, 而后台其实还在正常跑。
 	ENABLED_TEMPLATE_COUNT=0
 	config_foreach count_enabled_template template || {
 		log "failed to inspect templates"
 		return 1
 	}
-
-	source_budget=$SUBSCRIPTION_URL_COUNT
-	[ "$source_budget" -gt 0 ] || source_budget=1
-	checked_multiply_int32 "$source_budget" "$sub_timeout" || {
-		log "aggregate timeout exceeds signed 32-bit range"
-		return 1
-	}
-	checked_add_int32 "$CHECKED_RESULT" 60 || {
-		log "aggregate timeout exceeds signed 32-bit range"
-		return 1
-	}
-	aggregate_timeout=$CHECKED_RESULT
-
-	checked_multiply_int32 "$ENABLED_TEMPLATE_COUNT" "$sub_timeout" || {
-		log "request timeout exceeds signed 32-bit range"
-		return 1
-	}
-	template_budget=$CHECKED_RESULT
-	checked_add_int32 "$aggregate_timeout" "$template_budget" || {
-		log "request timeout exceeds signed 32-bit range"
-		return 1
-	}
-	checked_add_int32 "$CHECKED_RESULT" 60 || {
-		log "request timeout exceeds signed 32-bit range"
-		return 1
-	}
-	request_timeout=$CHECKED_RESULT
+	request_timeout=$((sub_timeout * (ENABLED_TEMPLATE_COUNT + 1) + 60))
+	[ "$request_timeout" -le 3660 ] || request_timeout=3660
 	startup_wait=${SBF_STARTUP_WAIT_LIMIT:-$request_timeout}
-	uint_between "$startup_wait" 1 2147483647 || {
+	uint_between "$startup_wait" 1 3660 || {
 		log "invalid converter startup wait limit"
 		return 1
 	}
 	pass_q=$(urlencode "$password")
 	template_q=$(urlencode "$default_template")
-}
-
-read_current_generation_id() {
-	local bytes generation extra
-	[ -e "$CURRENT_FILE" ] || [ -L "$CURRENT_FILE" ] || return 2
-	[ -f "$CURRENT_FILE" ] && [ ! -L "$CURRENT_FILE" ] || return 1
-	bytes=$(wc -c < "$CURRENT_FILE" 2>/dev/null)
-	bytes=$(printf '%s' "$bytes" | tr -d '[:space:]')
-	[ "$bytes" = 65 ] || return 1
-	IFS= read -r generation extra < "$CURRENT_FILE" || return 1
-	[ -z "${extra:-}" ] || return 1
-	[ "${#generation}" -eq 64 ] || return 1
-	case "$generation" in *[!0-9a-f]*) return 1 ;; esac
-	printf '%s\n' "$generation"
-}
-
-hash_generated_config() {
-	local digest
-	[ -f "$GENERATED_CONFIG" ] && [ ! -L "$GENERATED_CONFIG" ] || return 1
-	digest=$(sha256sum "$GENERATED_CONFIG" 2>/dev/null) || return 1
-	digest=${digest%% *}
-	[ "${#digest}" -eq 64 ] || return 1
-	case "$digest" in *[!0-9a-f]*) return 1 ;; esac
-	CONFIG_DIGEST=$digest
-}
-
-observe_generation_before_refresh() {
-	local generation status
-	hash_generated_config || {
-		log "cannot hash generated converter config"
-		return 1
-	}
-	generation=$(read_current_generation_id)
-	status=$?
-	case "$status" in
-		0) GENERATION_BEFORE_REFRESH=$generation ;;
-		2) GENERATION_BEFORE_REFRESH= ;;
-		*)
-			log "subscription current pointer is invalid before refresh"
-			return 1
-			;;
-	esac
-}
-
-validate_current_generation() {
-	local expected_digest="$1" generation first_generation status generation_dir
-	local manifest_file status_file aggregate_file value actual actual_size aggregate_sha
-
-	generation=$(read_current_generation_id) || {
-		log "subscription current pointer is missing or invalid"
-		return 1
-	}
-	first_generation=$generation
-	generation_dir=$SUBSCRIPTION_STATE/generations/$generation
-	[ -d "$generation_dir" ] && [ ! -L "$generation_dir" ] || {
-		log "selected subscription generation directory is invalid"
-		return 1
-	}
-	manifest_file=$generation_dir/manifest.json
-	status_file=$generation_dir/status.json
-	aggregate_file=$generation_dir/aggregate.json
-	for value in "$manifest_file" "$status_file" "$aggregate_file"; do
-		[ -f "$value" ] && [ ! -L "$value" ] || {
-			log "selected subscription generation is incomplete"
-			return 1
-		}
-	done
-
-	value=$(jsonfilter -i "$manifest_file" -e '@.schema' 2>/dev/null) || return 1
-	[ "$value" = 1 ] || return 1
-	value=$(jsonfilter -i "$manifest_file" -e '@.generation' 2>/dev/null) || return 1
-	[ "$value" = "$generation" ] || return 1
-	value=$(jsonfilter -i "$manifest_file" -e '@.config_digest' 2>/dev/null) || return 1
-	[ "$value" = "$expected_digest" ] || {
-		log "selected subscription generation belongs to another config"
-		return 1
-	}
-
-	value=$(jsonfilter -i "$manifest_file" -e '@.aggregate.sha256' 2>/dev/null) || return 1
-	[ "${#value}" -eq 64 ] || return 1
-	case "$value" in *[!0-9a-f]*) return 1 ;; esac
-	aggregate_sha=$value
-	actual=$(sha256sum "$aggregate_file" 2>/dev/null) || return 1
-	actual=${actual%% *}
-	[ "$actual" = "$value" ] || return 1
-	value=$(jsonfilter -i "$manifest_file" -e '@.aggregate.bytes' 2>/dev/null) || return 1
-	uint_between "$value" 1 2147483647 || return 1
-	actual_size=$(wc -c < "$aggregate_file" 2>/dev/null)
-	actual_size=$(printf '%s' "$actual_size" | tr -d '[:space:]')
-	[ "$actual_size" = "$value" ] || return 1
-	value=$(jsonfilter -i "$manifest_file" -e '@.aggregate.outbounds' 2>/dev/null) || return 1
-	uint_between "$value" 1 8192 || return 1
-
-	value=$(jsonfilter -i "$manifest_file" -e '@.status_sha256' 2>/dev/null) || return 1
-	[ "${#value}" -eq 64 ] || return 1
-	case "$value" in *[!0-9a-f]*) return 1 ;; esac
-	actual=$(sha256sum "$status_file" 2>/dev/null) || return 1
-	actual=${actual%% *}
-	[ "$actual" = "$value" ] || return 1
-	actual=$(jsonfilter -i "$status_file" -e '@.schema' 2>/dev/null) || return 1
-	[ "$actual" = 1 ] || return 1
-	actual=$(jsonfilter -i "$status_file" -e '@.generation' 2>/dev/null) || return 1
-	[ "$actual" = "$generation" ] || return 1
-	actual=$(jsonfilter -i "$status_file" -e '@.state' 2>/dev/null) || return 1
-	case "$actual" in fresh|degraded) ;; *) return 1 ;; esac
-
-	generation=$(read_current_generation_id) || return 1
-	[ "$generation" = "$first_generation" ] || {
-		log "subscription generation changed during validation"
-		return 1
-	}
-	VALIDATED_GENERATION=$generation
-	VALIDATED_AGGREGATE_SHA=$aggregate_sha
-}
-
-validate_pinned_generation() {
-	validate_current_generation "$CONFIG_DIGEST" || return 1
-	[ -n "$PINNED_GENERATION" ] &&
-		[ "$VALIDATED_GENERATION" = "$PINNED_GENERATION" ] &&
-		[ "$VALIDATED_AGGREGATE_SHA" = "$PINNED_AGGREGATE_SHA" ] || {
-			log "subscription generation changed after the converter snapshot was pinned"
-			return 1
-		}
-}
-
-validate_pinned_converter_snapshot() {
-	local digest size
-	[ -n "$CACHE_NODE" ] && [ -f "$CACHE_NODE" ] && [ ! -L "$CACHE_NODE" ] || {
-		log "converter node snapshot is missing or unsafe"
-		return 1
-	}
-	size=$(wc -c < "$CACHE_NODE" 2>/dev/null)
-	size=$(printf '%s' "$size" | tr -d '[:space:]')
-	uint_between "$size" 1 33554432 || {
-		log "converter node snapshot size is invalid"
-		return 1
-	}
-	digest=$(sha256sum "$CACHE_NODE" 2>/dev/null) || return 1
-	digest=${digest%% *}
-	[ "$digest" = "$PINNED_AGGREGATE_SHA" ] || {
-		log "converter node snapshot does not match the pinned subscription generation"
-		return 1
-	}
-}
-
-pin_converter_snapshot() {
-	PINNED_GENERATION=$VALIDATED_GENERATION
-	PINNED_AGGREGATE_SHA=$VALIDATED_AGGREGATE_SHA
-	[ -n "$PINNED_GENERATION" ] && [ -n "$PINNED_AGGREGATE_SHA" ] || return 1
-	acquire_subscription_lock || {
-		log "cannot lock the subscription generation for output rendering" || true
-		return 1
-	}
-	validate_pinned_generation &&
-		validate_pinned_converter_snapshot || return 1
-}
-
-require_new_generation_after_refresh() {
-	validate_current_generation "$CONFIG_DIGEST" || {
-		log "refresh did not select a valid same-config subscription generation"
-		return 1
-	}
-	[ -z "$GENERATION_BEFORE_REFRESH" ] ||
-		[ "$VALIDATED_GENERATION" != "$GENERATION_BEFORE_REFRESH" ] || {
-			log "refresh did not advance the subscription generation"
-			return 1
-		}
 }
 
 health_ok() {
@@ -1179,19 +540,11 @@ ensure_converter_for_generation() {
 		log "converter is running but not healthy on port ${port}; waiting for it to become ready" || return 1
 	else
 		log "converter is not running/ready on port ${port}; starting it temporarily" || return 1
-		if ! LF_LIFECYCLE_TOKEN="$LIFECYCLE_TOKEN" "$INIT" start manual >/dev/null 2>&1; then
-			# procd may publish an instance and only then fail while closing the
-			# transaction. The shared lifecycle lock proves this invocation owns
-			# that partial start, so retain the lock and stop it during cleanup.
-			if converter_running; then
-				STARTED_CONVERTER=1
-				log "converter start failed after publishing an instance; scheduling cleanup" || true
-			else
-				release_lifecycle_lock
-				log "converter start failed" || true
-			fi
+		LF_LIFECYCLE_TOKEN="$LIFECYCLE_TOKEN" "$INIT" start manual >/dev/null 2>&1 || {
+			release_lifecycle_lock
+			log "converter start failed" || true
 			return 1
-		fi
+		}
 		# Ownership begins only after a successful start. A pre-existing running
 		# service is never marked temporary and therefore is never stopped here.
 		STARTED_CONVERTER=1
@@ -1243,47 +596,6 @@ refresh_converter() {
 			;;
 	esac
 	return 1
-}
-
-synchronize_converter_snapshot() {
-	local output="$WORK_DIR/barrier.json" errfile="$WORK_DIR/barrier.err"
-	local code detail size digest
-
-	activate_subscription_barrier || {
-		log "cannot activate the converter snapshot synchronization barrier" || true
-		return 1
-	}
-	rm -f "$output" "$errfile"
-	code=$(curl -sS --connect-timeout 10 --max-time "$request_timeout" \
-		-o "$output" -w '%{http_code}' \
-		"http://127.0.0.1:${port}/?password=${pass_q}&template=%21liquid_formula_barrier&refresh=1" \
-		2>"$errfile") || {
-		detail=$(head -c 200 "$errfile" 2>/dev/null | tr -d '\r\n')
-		log "snapshot synchronization request failed: ${detail:-curl exited non-zero}" || true
-		return 1
-	}
-	# The frozen converter authenticates and runs query refresh through its
-	# refreshManager before it validates the requested template. This printable,
-	# permanently invalid ID therefore provides a side-effect-free manager fence:
-	# the exact 400 response below is emitted only after that refresh returns.
-	[ "$code" = 400 ] || {
-		log "snapshot synchronization returned unexpected HTTP ${code}" || true
-		return 1
-	}
-	size=$(wc -c < "$output" 2>/dev/null)
-	size=$(printf '%s' "$size" | tr -d '[:space:]')
-	[ "$size" = 77 ] || {
-		log "snapshot synchronization acknowledgement size is invalid" || true
-		return 1
-	}
-	digest=$(sha256sum "$output" 2>/dev/null) || return 1
-	digest=${digest%% *}
-	[ "$digest" = 40c11915012685b0c7bc8230a8499fc53d7fd1624227270f0a04ef5d68167aad ] || {
-		log "snapshot synchronization acknowledgement content is invalid" || true
-		return 1
-	}
-	validate_pinned_generation || return 1
-	validate_pinned_converter_snapshot || return 1
 }
 
 validate_generated() {
@@ -1371,18 +683,6 @@ install_output() {
 		chmod 0600 "$BACKUP_STAGE" || return 1
 	fi
 
-	if [ -n "$FAULT_HOOK" ]; then
-		"$FAULT_HOOK" before_final_output_rename || {
-			log "fault injected before final output replacement" || true
-			return 1
-		}
-	fi
-	validate_pinned_generation || {
-		log "subscription generation became invalid before output replacement" || true
-		return 1
-	}
-	validate_pinned_converter_snapshot || return 1
-
 	mv "$OUTPUT_STAGE" "$output_config" || return 1
 	OUTPUT_STAGE=
 	BACKUP_STAGE=
@@ -1422,7 +722,7 @@ load_cfg || exit 1
 
 case "$cmd" in
 	generate)
-		SBF_INCLUDE_DISABLED_URLS=0 "$GEN" >/dev/null || {
+		"$GEN" >/dev/null || {
 			log "converter config generation failed" || true
 			exit 1
 		}
@@ -1433,57 +733,36 @@ case "$cmd" in
 			log "cannot refresh because the converter is not running and healthy (check: curl -sS http://127.0.0.1:${port}/health)" || true
 			exit 1
 		}
-		observe_generation_before_refresh || exit 1
 		refresh_converter || {
 			log "refresh failed" || true
-			exit 1
-		}
-		require_new_generation_after_refresh || exit 1
-		pin_converter_snapshot || exit 1
-		synchronize_converter_snapshot || exit 1
-		release_subscription_lock || {
-			log "failed to release the subscription snapshot binding" || true
 			exit 1
 		}
 		log "refresh ok" || exit 1
 		;;
 	check|apply)
-		SBF_INCLUDE_DISABLED_URLS=1 "$GEN" >/dev/null || {
+		[ -n "$sub_url" ] && valid_http_url "$sub_url" || {
+			log "subscription_url must use HTTP or HTTPS" || true
+			exit 1
+		}
+		"$GEN" >/dev/null || {
 			log "converter config generation failed" || true
 			exit 1
 		}
-		[ "$SERVICE_ENABLED" = 1 ] || RESTORE_AT_REST_CONFIG=1
-		observe_generation_before_refresh || exit 1
 		ensure_converter_for_generation || {
 			log "cannot reach converter; enable/start it and check the subscription URL" || true
 			exit 1
 		}
-		refresh_converter || {
-			log "refresh failed" || true
-			exit 1
-		}
-		require_new_generation_after_refresh || exit 1
-		pin_converter_snapshot || exit 1
-		synchronize_converter_snapshot || exit 1
+		refresh_converter || log "refresh failed; trying cached data" || exit 1
 		GENERATED="$WORK_DIR/generated.json"
 		fetch_config "$GENERATED" || {
 			log "failed to fetch generated config" || true
 			exit 1
 		}
 		validate_generated "$GENERATED" || exit 1
-		validate_pinned_generation || {
-			log "subscription generation became invalid after output download" || true
-			exit 1
-		}
-		validate_pinned_converter_snapshot || exit 1
 		if [ "$cmd" = check ]; then
 			log "check ok" || exit 1
 		else
 			install_output "$GENERATED" || exit 1
 		fi
-		release_subscription_lock || {
-			log "failed to release the subscription snapshot binding" || true
-			exit 1
-		}
 		;;
 esac

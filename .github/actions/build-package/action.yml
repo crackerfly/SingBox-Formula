@@ -97,7 +97,6 @@ runs:
         cp -a "openwrt-feed/${LUCI_PACKAGE}" "openwrt-sdk/package/custom/${LUCI_PACKAGE}"
         # Neither the converter nor the DPI helpers may ship a prebuilt binary.
         test ! -e "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/sb-sub-c"
-        test ! -e "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/liquid-formula-subscription-gateway"
         test ! -e "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/fakehttp"
         test ! -e "openwrt-sdk/package/custom/${MAIN_PACKAGE}/files/usr/bin/fakesip"
 
@@ -137,7 +136,7 @@ runs:
         make "package/custom/${MAIN_PACKAGE}/compile" V=s -j"$(nproc)"
         make "package/custom/${LUCI_PACKAGE}/compile" V=s -j"$(nproc)"
 
-    - name: Verify the Go commands were cross-compiled for the target
+    - name: Verify the converter was cross-compiled for the target
       shell: bash
       env:
         ARCH: ${{ inputs.arch }}
@@ -151,14 +150,6 @@ runs:
         fi
         DESCRIPTION="$(file -b "${CONVERTER}")"
         echo "${ARCH}: ${DESCRIPTION}"
-
-        SUBSCRIPTION_GATEWAY="$(find openwrt-sdk/build_dir -type f -name liquid-formula-subscription-gateway -perm -111 -print -quit)"
-        if [ -z "${SUBSCRIPTION_GATEWAY}" ]; then
-          echo "liquid-formula-subscription-gateway was not produced" >&2
-          exit 1
-        fi
-        GATEWAY_DESCRIPTION="$(file -b "${SUBSCRIPTION_GATEWAY}")"
-        echo "subscription gateway: ${GATEWAY_DESCRIPTION}"
 
         # FakeHTTP / FakeSIP are cross-compiled C; verify they match the target too.
         for helper in fakehttp fakesip; do
@@ -188,10 +179,6 @@ runs:
 
         if [[ ! "${DESCRIPTION}" =~ ${EXPECT} ]]; then
           echo "Converter ELF does not match ${ARCH} (wanted /${EXPECT}/)" >&2
-          exit 1
-        fi
-        if [[ ! "${GATEWAY_DESCRIPTION}" =~ ${EXPECT} ]]; then
-          echo "Subscription gateway ELF does not match ${ARCH} (wanted /${EXPECT}/)" >&2
           exit 1
         fi
 

@@ -2,32 +2,6 @@
 
 umask 077
 
-LEGACY_MARKER_TMP=
-
-cleanup_legacy_marker_tmp() {
-	[ -z "$LEGACY_MARKER_TMP" ] || rm -f "$LEGACY_MARKER_TMP"
-}
-
-trap cleanup_legacy_marker_tmp 0
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-publish_legacy_subscription_marker() {
-	marker_digest=$1
-	marker_dir=/var/lib/liquid-formula/subscriptions
-	marker_path=$marker_dir/legacy-first-url.sha256
-
-	mkdir -p "$marker_dir" || return 1
-	[ -d "$marker_dir" ] && [ ! -L "$marker_dir" ] || return 1
-	chmod 0700 "$marker_dir" || return 1
-	LEGACY_MARKER_TMP=$(mktemp "$marker_dir/.legacy-first-url.XXXXXX") || return 1
-	printf '%s\n' "$marker_digest" > "$LEGACY_MARKER_TMP" || return 1
-	chmod 0600 "$LEGACY_MARKER_TMP" || return 1
-	mv "$LEGACY_MARKER_TMP" "$marker_path" || return 1
-	LEGACY_MARKER_TMP=
-}
-
 # 1.7.0 改名迁移: singbox_formula -> liquid_formula。
 # 必须排在所有 uci 操作之前, 否则新配置会以默认值覆盖用户的既有设置。
 if [ -f /etc/config/singbox_formula ] && [ ! -f /etc/config/liquid_formula ]; then
@@ -36,15 +10,14 @@ if [ -f /etc/config/singbox_formula ] && [ ! -f /etc/config/liquid_formula ]; th
 	logger -t liquid-formula "migrated /etc/config/singbox_formula to liquid_formula"
 fi
 
-# 旧的生成产物与运行目录改名后不再使用, 留着只会让人误判。
-[ -d /etc/singbox-formula ] && rm -rf /etc/singbox-formula 2>/dev/null
-[ -d /var/log/singbox-formula ] && rm -rf /var/log/singbox-formula 2>/dev/null
-[ -d /var/lib/singbox-formula ] && rm -rf /var/lib/singbox-formula 2>/dev/null
-[ -d /var/run/singbox-formula ] && rm -rf /var/run/singbox-formula 2>/dev/null
+# 旧服务必须先停用，避免和新服务并行；但旧配置、日志、状态和 init 脚本可能仍是
+# 用户唯一的回退/比对依据。安装迁移不再递归删除它们，由清理指南要求用户备份后
+# 逐项确认。这样升级失败或字段迁移不完整时仍有恢复来源。
 if [ -x /etc/init.d/singbox-formula ]; then
-	/etc/init.d/singbox-formula stop >/dev/null 2>&1
-	/etc/init.d/singbox-formula disable >/dev/null 2>&1
-	rm -f /etc/init.d/singbox-formula
+	legacy_service_rc=0
+	/etc/init.d/singbox-formula stop >/dev/null 2>&1 || legacy_service_rc=1
+	/etc/init.d/singbox-formula disable >/dev/null 2>&1 || legacy_service_rc=1
+	[ "$legacy_service_rc" -eq 0 ] || exit 1
 fi
 
 mkdir -p /etc/liquid-formula /var/lib/liquid-formula/cache /var/log/liquid-formula /www/liquid-formula/templates
@@ -60,16 +33,84 @@ set_if_missing() {
 	fi
 }
 
+migrate_subscription_url_to_scalar() {
+	local exported value_type values first
+	exported=$(uci -q export liquid_formula) || return 1
+	value_type=$(
+		printf '%s\n' "$exported" | awk '
+			$1 == "config" {
+				in_main = ($3 == "\047main\047")
+				next
+			}
+			in_main && ($1 == "option" || $1 == "list") &&
+				$2 == "subscription_url" {
+				if (value_type == "") value_type = $1
+				else if (value_type != $1) value_type = "mixed"
+			}
+			END { print value_type }
+		'
+	) || return 1
+	case "$value_type" in
+		list)
+			values=$(uci -q get liquid_formula.main.subscription_url) || values=
+			first=${values%% *}
+			uci -q delete liquid_formula.main.subscription_url || return 1
+			if [ -n "$first" ]; then
+				uci set "liquid_formula.main.subscription_url=$first" || return 1
+			fi
+			changed=1
+			logger -t liquid-formula "migrated ordered subscription list to its first URL for 1.8.6"
+			;;
+		option|'') ;;
+		*) return 1 ;;
+	esac
+}
+
+migrate_user_agent_preset() {
+	local old new
+	old=$(uci -q get liquid_formula.main.user_agent) || return 0
+	case "$old" in
+		'sing-box 1.11.0') new='sing-box 1.13.15' ;;
+		'SFI/1.11.0 (sing-box 1.11.0)') new='SFI/1.13.15 (sing-box 1.13.15)' ;;
+		'SFA/1.11.0 (sing-box 1.11.0)') new='SFA/1.13.15 (sing-box 1.13.15)' ;;
+		'SFM/1.11.0 (sing-box 1.11.0)') new='SFM/1.13.15 (sing-box 1.13.15)' ;;
+		'v2rayN/7.0.0') new='v2rayN/7.24.4' ;;
+		'v2rayNG/1.9.16') new='v2rayNG/2.2.6' ;;
+		'Karing/1.0.0') new='Karing/1.2.23.2605' ;;
+		*) return 0 ;;
+	esac
+	uci set "liquid_formula.main.user_agent=$new" || return 1
+	changed=1
+}
+
+backup_gateway_config() {
+	local config=/etc/liquid-formula/config.yaml
+	local backup=/etc/liquid-formula/config.yaml.pre-1.8.6
+	local temporary
+	[ -f "$config" ] && [ ! -L "$config" ] || return 1
+	grep -q '^liquid_formula_gateway:' "$config" 2>/dev/null || return 1
+	if [ -L "$backup" ] || { [ -e "$backup" ] && [ ! -f "$backup" ]; }; then
+		return 2
+	fi
+	if [ ! -e "$backup" ]; then
+		temporary=$(mktemp /etc/liquid-formula/.config.yaml.pre-1.8.6.XXXXXX) || return 2
+		if ! cat "$config" > "$temporary" || ! chmod 0600 "$temporary" || ! mv "$temporary" "$backup"; then
+			rm -f "$temporary"
+			return 2
+		fi
+	fi
+	return 0
+}
+
 # Upgrade migrations are additive. An existing value, including an explicitly
 # empty string or a value that matched an older package default, is a user choice.
-# subscription_url is the one type migration below: pre-1.8.4 stored one option,
-# while 1.8.4 stores an ordered list and deliberately omits an empty list.
 set_if_missing liquid_formula.main global || exit 1
 set_if_missing liquid_formula.main.enabled 0 || exit 1
 set_if_missing liquid_formula.main.boot_delay 90 || exit 1
 set_if_missing liquid_formula.main.port 9716 || exit 1
 set_if_missing liquid_formula.main.password 890716 || exit 1
-set_if_missing liquid_formula.main.user_agent 'sing-box 1.11.0' || exit 1
+set_if_missing liquid_formula.main.subscription_url '' || exit 1
+set_if_missing liquid_formula.main.user_agent 'v2rayN/7.24.4' || exit 1
 set_if_missing liquid_formula.main.momo_bypass_fakehttp 1 || exit 1
 set_if_missing liquid_formula.main.momo_bypass_fakesip 1 || exit 1
 set_if_missing liquid_formula.main.subscription_timeout 60 || exit 1
@@ -92,59 +133,27 @@ set_if_missing liquid_formula.localdns_template.name 'Local DNS Template' || exi
 set_if_missing liquid_formula.localdns_template.file localdns-template.json || exit 1
 set_if_missing liquid_formula.localdns_template.no_node '➜ Direct' || exit 1
 
-legacy_marker_digest=
-uci_export=$(uci -q export liquid_formula) || exit 1
-subscription_value_type=$(
-	printf '%s\n' "$uci_export" | awk '
-		$1 == "config" {
-			in_main = ($3 == "\047main\047")
-			next
-		}
-		in_main && ($1 == "option" || $1 == "list") &&
-			$2 == "subscription_url" {
-			if (value_type == "")
-				value_type = $1
-			else if (value_type != $1)
-				value_type = "mixed"
-		}
-		END { print value_type }
-	'
-) || exit 1
-
-case "$subscription_value_type" in
-	option)
-		legacy_subscription_url=$(uci -q get liquid_formula.main.subscription_url) || exit 1
-		uci -q delete liquid_formula.main.subscription_url || exit 1
-		changed=1
-		if [ -n "$legacy_subscription_url" ]; then
-			uci -q add_list \
-				"liquid_formula.main.subscription_url=$legacy_subscription_url" || exit 1
-			legacy_marker_line=$(printf '%s' "$legacy_subscription_url" | sha256sum) || exit 1
-			legacy_marker_digest=${legacy_marker_line%% *}
-			[ "${#legacy_marker_digest}" -eq 64 ] || exit 1
-			case "$legacy_marker_digest" in
-				*[!0-9a-f]*) exit 1 ;;
-			esac
-		fi
-		;;
-	list|'') ;;
-	*) exit 1 ;;
-esac
+migrate_subscription_url_to_scalar || exit 1
+migrate_user_agent_preset || exit 1
 
 if [ "$changed" = "1" ]; then
 	uci commit liquid_formula || exit 1
-fi
-
-if [ -n "$legacy_marker_digest" ]; then
-	publish_legacy_subscription_marker "$legacy_marker_digest" || exit 1
 fi
 
 if [ -x /etc/init.d/liquid-formula ]; then
 	/etc/init.d/liquid-formula enable >/dev/null 2>&1 || exit 1
 fi
 
-if [ ! -e /etc/liquid-formula/config.yaml ] &&
-	[ ! -L /etc/liquid-formula/config.yaml ] &&
+regenerate=0
+backup_gateway_config
+backup_rc=$?
+case "$backup_rc" in
+	0) regenerate=1 ;;
+	1) ;;
+	*) exit 1 ;;
+esac
+
+if { [ "$regenerate" = 1 ] || { [ ! -e /etc/liquid-formula/config.yaml ] && [ ! -L /etc/liquid-formula/config.yaml ]; }; } &&
 	[ -x /usr/share/liquid-formula/generate-config.sh ]; then
 	/usr/share/liquid-formula/generate-config.sh >/dev/null 2>&1 || exit 1
 fi

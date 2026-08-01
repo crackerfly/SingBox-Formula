@@ -16,6 +16,9 @@ MAKEFILE_LUCI="$LUCI/Makefile"
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-tuning.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
+OPENWRT_RELEASE="$TEST_TMP/openwrt_release"
+printf "DISTRIB_RELEASE='25.12.0'\n" > "$OPENWRT_RELEASE"
+
 . "$SCRIPT_DIR/harness.sh"
 
 assert_file_exists "$APPLY" "tuning apply helper exists"
@@ -85,6 +88,7 @@ run_apply() {
 LFAPP_SYSCTL_DROPIN="$TEST_TMP/etc/sysctl.d/99-liquid-formula.conf" \
 LFAPP_SYSCTL_CONF="$TEST_TMP/etc/sysctl.conf" \
 LFAPP_INIT_DIR="$TEST_TMP/init.d" \
+LFAPP_OPENWRT_RELEASE="$OPENWRT_RELEASE" \
 LFAPP_TUNING_LOCK="$TEST_TMP/tuning.lock" \
 		sh "$APPLY" >"$TEST_TMP/apply.out" 2>"$TEST_TMP/apply.err"
 }
@@ -96,6 +100,7 @@ run_apply_at() {
 LFAPP_SYSCTL_DROPIN="$dropin" \
 LFAPP_SYSCTL_CONF="$sysctl_conf" \
 LFAPP_INIT_DIR="$TEST_TMP/init.d" \
+LFAPP_OPENWRT_RELEASE="$OPENWRT_RELEASE" \
 LFAPP_GREP_BIN="${MOCK_GREP_BIN:-grep}" \
 LFAPP_FLOCK_BIN="${MOCK_FLOCK_BIN:-flock}" \
 LFAPP_TUNING_LOCK="${MOCK_LOCK_FILE:-$TEST_TMP/tuning.lock}" \
@@ -428,6 +433,39 @@ write_config 1 3 cake bbr 8 0
 run_apply
 assert_equal 1 "$?" "an implausibly small SYN backlog is rejected"
 
+write_config 1 3 fq bbr 512 0
+run_apply
+assert_equal 1 "$?" "an unlisted queueing discipline is rejected"
+assert_contains "$TEST_TMP/apply.err" 'invalid default_qdisc: fq' "the qdisc rejection names the invalid value"
+
+write_config 1 3 cake westwood 512 0
+run_apply
+assert_equal 1 "$?" "an unlisted congestion control is rejected"
+assert_contains "$TEST_TMP/apply.err" 'invalid congestion_control: westwood' "the congestion rejection names the invalid value"
+
+write_config 1 3 cake bbr 129 0
+run_apply
+assert_equal 1 "$?" "an unlisted SYN backlog is rejected"
+assert_contains "$TEST_TMP/apply.err" 'invalid tcp_max_syn_backlog: 129' "the backlog rejection names the invalid value"
+
+printf "DISTRIB_RELEASE='24.10.4'\n" > "$OPENWRT_RELEASE"
+write_config 1 3 cake_mq bbr 512 0
+run_apply
+assert_equal 1 "$?" "cake_mq is rejected before OpenWrt 25.12"
+assert_contains "$TEST_TMP/apply.err" 'cake_mq requires OpenWrt 25.12 or newer' "the release gate explains the cake_mq requirement"
+
+printf "DISTRIB_RELEASE='snapshot'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 1 "$?" "cake_mq is rejected when the OpenWrt release is unknown"
+
+printf "DISTRIB_RELEASE='25.12.0'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 0 "$?" "cake_mq is accepted on OpenWrt 25.12"
+
+printf "DISTRIB_RELEASE='26.1.0'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 0 "$?" "cake_mq is accepted after OpenWrt 25.12"
+
 # --- rpcd surface -------------------------------------------------------------
 
 assert_contains "$RPC" 'tuning_status' "rpcd publishes the tuning status method"
@@ -435,6 +473,7 @@ assert_contains "$RPC" 'tuning_apply' "rpcd publishes the tuning apply method"
 assert_contains "$RPC" 'sysctl_conf_conflict' "status reports whether sysctl.conf overrides the drop-in"
 assert_contains "$RPC" 'cake_module' "status reports whether the cake module is present"
 assert_contains "$RPC" 'bbr_module' "status reports whether the bbr module is present"
+assert_contains "$RPC" 'openwrt_release' "status reports the OpenWrt release for version-gated controls"
 
 assert_contains "$ACL" '"tuning"' "ACL grants access to the tuning config"
 assert_contains "$ACL" '"irqbalance"' "ACL grants access to the irqbalance config"
@@ -450,8 +489,23 @@ assert_not_contains "$VIEW" "this\.super\('handleSaveApply'" "saving does not du
 assert_contains "$VIEW" 'kmod-sched-cake' "the page explains the cake module requirement"
 assert_contains "$VIEW" 'kmod-tcp-bbr' "the page explains the bbr module requirement"
 
-# 状态同步: 装包时默认值取自系统实际值, 而不是写死的推荐值。
-assert_contains "$DEFAULTS" 'seed_from_proc' "install seeds tuning defaults from the running kernel"
-assert_contains "$DEFAULTS" '/proc/sys/net/ipv4/tcp_congestion_control' "the congestion control default mirrors the live value"
+assert_contains "$VIEW" "s\\.option\\(form\\.ListValue, 'tuning_default_qdisc'" "qdisc uses a fixed dropdown"
+assert_contains "$VIEW" "s\\.option\\(form\\.ListValue, 'tuning_congestion_control'" "congestion control uses a fixed dropdown"
+assert_contains "$VIEW" "s\\.option\\(form\\.ListValue, 'tuning_backlog'" "SYN backlog uses a fixed dropdown"
+assert_contains "$VIEW" "o\\.value\\('cake_mq'" "qdisc dropdown contains cake_mq"
+assert_contains "$VIEW" "o\\.value\\('cubic'" "congestion dropdown contains cubic"
+assert_contains "$VIEW" "o\\.value\\('reno'" "congestion dropdown contains reno"
+assert_contains "$VIEW" "o\\.value\\('128'" "backlog dropdown contains 128"
+assert_contains "$VIEW" "o\\.value\\('2048'" "backlog dropdown contains 2048"
+assert_contains "$VIEW" 'supportsCakeMq' "cake_mq visibility uses an explicit release gate"
+
+# 固定默认值只补真正缺失的 UCI 项；显式空值也属于用户状态，不能覆盖。
+assert_not_contains "$DEFAULTS" '/proc/sys/net/core/default_qdisc' "qdisc default no longer mirrors an arbitrary live value"
+assert_not_contains "$DEFAULTS" '/proc/sys/net/ipv4/tcp_congestion_control' "congestion default no longer mirrors an arbitrary live value"
+assert_not_contains "$DEFAULTS" '/proc/sys/net/ipv4/tcp_max_syn_backlog' "backlog default no longer mirrors an arbitrary live value"
+assert_contains "$DEFAULTS" '^seed_missing default_qdisc cake$' "fresh qdisc default is cake"
+assert_contains "$DEFAULTS" '^seed_missing congestion_control bbr$' "fresh congestion default is bbr"
+assert_contains "$DEFAULTS" '^seed_missing tcp_max_syn_backlog 512$' "fresh backlog default is 512"
+assert_contains "$DEFAULTS" 'uci -q get "tuning.main.\$option" >/dev/null 2>&1' "fixed defaults distinguish missing options from explicit empty values"
 
 finish_tests

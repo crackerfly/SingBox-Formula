@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=liquid-formula
-PKG_VERSION:=1.8.5
+PKG_VERSION:=1.8.6
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0 GPL-3.0-or-later MIT
 PKG_LICENSE_FILES:=LICENSE LICENSES/GPL-3.0-or-later.txt LICENSES/MIT-lumberjack.txt \
@@ -12,7 +12,7 @@ PKG_BUILD_PARALLEL:=1
 PKG_BUILD_FLAGS:=no-mips16
 
 GO_PKG:=github.com/haierkeys/singbox-subscribe-convert
-GO_PKG_BUILD_PKG:=$(GO_PKG) $(GO_PKG)/cmd/liquid-formula-subscription-gateway
+GO_PKG_BUILD_PKG:=github.com/haierkeys/singbox-subscribe-convert
 GO_PKG_INSTALL_EXTRA:=config/config.yaml
 
 # ---------------------------------------------------------- DPI helpers ----
@@ -67,8 +67,6 @@ endef
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(CP) ./src/. $(PKG_BUILD_DIR)/
-	mkdir -p $(PKG_BUILD_DIR)/cmd/liquid-formula-subscription-gateway
-	$(CP) ./src-subscription-gateway/. $(PKG_BUILD_DIR)/cmd/liquid-formula-subscription-gateway/
 	# Kept out of the Go module tree so `go install ./...` never walks into it.
 	mkdir -p $(PKG_BUILD_DIR)/dpi
 	$(CP) ./src-dpi/. $(PKG_BUILD_DIR)/dpi/
@@ -89,7 +87,6 @@ endef
 define Build/Compile
 	$(call GoPackage/Build/Compile)
 	$(CP) $(GO_PKG_BUILD_BIN_DIR)/singbox-subscribe-convert $(PKG_BUILD_DIR)/sb-sub-c
-	$(CP) $(GO_PKG_BUILD_BIN_DIR)/liquid-formula-subscription-gateway $(PKG_BUILD_DIR)/liquid-formula-subscription-gateway
 	$(call Build/Compile/dpi,fakehttp,$(FAKEHTTP_VERSION))
 	$(call Build/Compile/dpi,fakesip,$(FAKESIP_VERSION))
 endef
@@ -97,7 +94,6 @@ endef
 define Package/liquid-formula/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/sb-sub-c $(1)/usr/bin/sb-sub-c
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/liquid-formula-subscription-gateway $(1)/usr/bin/liquid-formula-subscription-gateway
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/liquid-formula $(1)/etc/init.d/liquid-formula
 	$(INSTALL_DIR) $(1)/etc/config
@@ -109,7 +105,6 @@ define Package/liquid-formula/install
 	$(INSTALL_BIN) ./files/usr/share/liquid-formula/update.sh $(1)/usr/share/liquid-formula/update.sh
 	$(INSTALL_BIN) ./files/usr/share/liquid-formula/validate-template.sh $(1)/usr/share/liquid-formula/validate-template.sh
 	$(INSTALL_BIN) ./files/usr/share/liquid-formula/run-delayed.sh $(1)/usr/share/liquid-formula/run-delayed.sh
-	$(INSTALL_BIN) ./files/usr/share/liquid-formula/wait-subscription-gateway.sh $(1)/usr/share/liquid-formula/wait-subscription-gateway.sh
 	$(INSTALL_DIR) $(1)/www/liquid-formula/templates
 	$(INSTALL_DATA) ./files/www/liquid-formula/templates/momo-template.json $(1)/www/liquid-formula/templates/momo-template.json
 	$(INSTALL_DATA) ./files/www/liquid-formula/templates/localdns-template.json $(1)/www/liquid-formula/templates/localdns-template.json
@@ -152,7 +147,12 @@ define Package/liquid-formula/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] || {
 	mkdir -p /etc/liquid-formula /var/lib/liquid-formula/cache /var/log/liquid-formula /www/liquid-formula/templates /etc/momo/profiles
-	[ -x /etc/uci-defaults/99-liquid-formula ] && /etc/uci-defaults/99-liquid-formula >/dev/null 2>&1 || true
+	if [ -x /etc/uci-defaults/99-liquid-formula ]; then
+		/etc/uci-defaults/99-liquid-formula >/dev/null 2>&1 || exit 1
+	fi
+	if [ -x /etc/uci-defaults/99-liquid-formula-dpi ]; then
+		/etc/uci-defaults/99-liquid-formula-dpi >/dev/null 2>&1 || exit 1
+	fi
 	# Register the service so the boot() hook is considered; the UCI 'enabled'
 	# flag remains the actual autostart switch (default off).
 	[ -x /etc/init.d/liquid-formula ] && /etc/init.d/liquid-formula enable >/dev/null 2>&1 || true

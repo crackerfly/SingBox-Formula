@@ -20,120 +20,62 @@ MOCK_BIN="$TEST_TMP/bin"
 MOCK_ROOT="$TEST_TMP/root"
 UCI_STATE="$TEST_TMP/uci.state"
 UCI_CALLS="$TEST_TMP/uci.calls"
-MIGRATION_EVENTS="$TEST_TMP/migration.events"
+UCI_TYPES="$TEST_TMP/uci.types"
 MIGRATION_UNDER_TEST="$TEST_TMP/99-liquid-formula"
-GENERATED_CONFIG="$MOCK_ROOT/etc/liquid-formula/config.yaml"
-mkdir -p "$MOCK_BIN" "$MOCK_ROOT/etc/init.d" "$(dirname "$GENERATED_CONFIG")" \
+mkdir -p "$MOCK_BIN" \
+	"$MOCK_ROOT/etc/config" \
+	"$MOCK_ROOT/etc/init.d" \
+	"$MOCK_ROOT/etc/singbox-formula" \
+	"$MOCK_ROOT/var/log/singbox-formula" \
+	"$MOCK_ROOT/var/lib/singbox-formula" \
+	"$MOCK_ROOT/var/run/singbox-formula" \
 	"$MOCK_ROOT/usr/share/liquid-formula"
-SYSTEM_MV=$(command -v mv)
-export SYSTEM_MV
+
+printf 'legacy uci sentinel\n' > "$MOCK_ROOT/etc/config/singbox_formula"
+printf 'legacy config sentinel\n' > "$MOCK_ROOT/etc/singbox-formula/config.yaml"
+printf 'legacy log sentinel\n' > "$MOCK_ROOT/var/log/singbox-formula/server.log"
+printf 'legacy state sentinel\n' > "$MOCK_ROOT/var/lib/singbox-formula/state.json"
+printf 'legacy runtime sentinel\n' > "$MOCK_ROOT/var/run/singbox-formula/owner"
+
+cat > "$MOCK_ROOT/etc/init.d/singbox-formula" <<EOF
+#!/bin/sh
+printf 'legacy-init|%s\n' "\$*" >> "$TEST_TMP/legacy-init.calls"
+case "\${1:-}" in
+	stop) exit "\${MOCK_LEGACY_STOP_RC:-0}" ;;
+	disable) exit "\${MOCK_LEGACY_DISABLE_RC:-0}" ;;
+esac
+exit 2
+EOF
+chmod 0755 "$MOCK_ROOT/etc/init.d/singbox-formula"
+: > "$TEST_TMP/legacy-init.calls"
 
 cat > "$MOCK_BIN/uci" <<'EOF'
 #!/bin/sh
 set -u
 
-delimiter=' '
-while [ "$#" -gt 0 ]; do
-	case "$1" in
-		-q) shift ;;
-		-d)
-			delimiter=${2-}
-			shift 2
-			;;
-		*) break ;;
-	esac
-done
+while [ "${1:-}" = "-q" ]; do shift; done
 command=${1:-}
 [ "$#" -gt 0 ] && shift
 
 case "$command" in
 	get)
 		key=${1:-}
-		awk -F '\t' -v wanted="$key" -v delimiter="$delimiter" '
+		type=$(awk -F '\t' -v wanted="$key" '$1 == wanted { value=$2 } END { print value }' "$MOCK_UCI_TYPES")
+		if [ "$type" = list ]; then
+			awk -F '\t' -v wanted="$key" '
+				$1 == wanted { if (seen++) printf " "; printf "%s", substr($0, index($0, "\t") + 1) }
+				END { if (!seen) exit 1; print "" }
+			' "$MOCK_UCI_STATE"
+			exit $?
+		fi
+		awk -F '\t' -v wanted="$key" '
 			$1 == wanted {
-				scalar = 1
-				scalar_value = substr($0, index($0, "\t") + 1)
-			}
-			index($1, wanted ".__list.") == 1 {
-				list_count++
-				list_value = substr($0, index($0, "\t") + 1)
-				joined = joined (list_count > 1 ? delimiter : "") list_value
+				found = 1
+				value = substr($0, index($0, "\t") + 1)
 			}
 			END {
-				if (scalar) print scalar_value
-				else if (list_count) print joined
-				else exit 1
-			}
-		' "$MOCK_UCI_STATE"
-		;;
-	show)
-		key=${1:-}
-		awk -F '\t' -v wanted="$key" -v delimiter="$delimiter" '
-			function quote(value) {
-				gsub(/\047/, "\047\\\047\047", value)
-				return "\047" value "\047"
-			}
-			$1 == wanted {
-				scalar = 1
-				scalar_value = substr($0, index($0, "\t") + 1)
-			}
-			index($1, wanted ".__list.") == 1 {
-				list_count++
-				list_value = substr($0, index($0, "\t") + 1)
-				joined = joined (list_count > 1 ? delimiter : "") quote(list_value)
-			}
-			END {
-				if (scalar) printf "%s=%s\n", wanted, quote(scalar_value)
-				else if (list_count) printf "%s=%s\n", wanted, joined
-				else exit 1
-			}
-		' "$MOCK_UCI_STATE"
-		;;
-	export)
-		# This fixture stores one package; no argument therefore models
-		# `uci export` of all packages by exporting liquid_formula.
-		package=${1:-liquid_formula}
-		awk -F '\t' -v wanted="$package" '
-			function quote(value) {
-				gsub(/\047/, "\047\\\047\047", value)
-				return "\047" value "\047"
-			}
-			{
-				row_count++
-				row_key[row_count] = $1
-				row_value[row_count] = substr($0, index($0, "\t") + 1)
-			}
-			END {
-				for (i = 1; i <= row_count; i++) {
-					key = row_key[i]
-					remainder = key
-					sub("^" wanted "\\.", "", remainder)
-					if (key !~ ("^" wanted "\\.") || remainder ~ /\./)
-						continue
-					section_count++
-					section_key[section_count] = key
-					section_name[section_count] = remainder
-					section_type[section_count] = row_value[i]
-				}
-				if (!section_count)
-					exit 1
-				printf "package %s\n\n", wanted
-				for (i = 1; i <= section_count; i++) {
-					prefix = section_key[i] "."
-					printf "config %s %s\n", section_type[i], quote(section_name[i])
-					for (j = 1; j <= row_count; j++) {
-						if (index(row_key[j], prefix) != 1)
-							continue
-						option = substr(row_key[j], length(prefix) + 1)
-						if (option ~ /\.__list\.[0-9]+$/) {
-							sub(/\.__list\.[0-9]+$/, "", option)
-							printf "\tlist %s %s\n", option, quote(row_value[j])
-						} else if (option !~ /\./) {
-							printf "\toption %s %s\n", option, quote(row_value[j])
-						}
-					}
-					print ""
-				}
+				if (!found) exit 1
+				print value
 			}
 		' "$MOCK_UCI_STATE"
 		;;
@@ -142,42 +84,15 @@ case "$command" in
 		key=${assignment%%=*}
 		value=${assignment#*=}
 		tmp="$MOCK_UCI_STATE.tmp.$$"
-		awk -F '\t' -v wanted="$key" '
-			$1 != wanted && index($1, wanted ".__list.") != 1 { print }
-		' "$MOCK_UCI_STATE" > "$tmp"
+		awk -F '\t' -v wanted="$key" '$1 != wanted { print }' "$MOCK_UCI_STATE" > "$tmp"
 		printf '%s\t%s\n' "$key" "$value" >> "$tmp"
 		mv "$tmp" "$MOCK_UCI_STATE"
+		if [ "$key" = liquid_formula.main.subscription_url ]; then
+			awk -F '\t' -v wanted="$key" '$1 != wanted { print }' "$MOCK_UCI_TYPES" > "$MOCK_UCI_TYPES.tmp.$$"
+			printf '%s\toption\n' "$key" >> "$MOCK_UCI_TYPES.tmp.$$"
+			mv "$MOCK_UCI_TYPES.tmp.$$" "$MOCK_UCI_TYPES"
+		fi
 		printf 'set|%s|%s\n' "$key" "$value" >> "$MOCK_UCI_CALLS"
-		;;
-	add_list)
-		assignment=${1:-}
-		key=${assignment%%=*}
-		value=${assignment#*=}
-		tmp="$MOCK_UCI_STATE.tmp.$$"
-		scalar_present=0
-		scalar_value=
-		if scalar_value=$(awk -F '\t' -v wanted="$key" '
-			$1 == wanted { print substr($0, index($0, "\t") + 1); found = 1 }
-			END { exit(found ? 0 : 1) }
-		' "$MOCK_UCI_STATE"); then
-			scalar_present=1
-		fi
-		awk -F '\t' -v wanted="$key" '$1 != wanted { print }' "$MOCK_UCI_STATE" > "$tmp"
-		index=$(awk -F '\t' -v prefix="$key.__list." '
-			index($1, prefix) == 1 {
-				number = substr($1, length(prefix) + 1) + 0
-				if (number > maximum) maximum = number
-			}
-			END { print maximum + 0 }
-		' "$tmp")
-		if [ "$scalar_present" = 1 ]; then
-			index=$((index + 1))
-			printf '%s.__list.%s\t%s\n' "$key" "$index" "$scalar_value" >> "$tmp"
-		fi
-		index=$((index + 1))
-		printf '%s.__list.%s\t%s\n' "$key" "$index" "$value" >> "$tmp"
-		mv "$tmp" "$MOCK_UCI_STATE"
-		printf 'add_list|%s|%s\n' "$key" "$value" >> "$MOCK_UCI_CALLS"
 		;;
 	delete)
 		key=${1:-}
@@ -186,11 +101,21 @@ case "$command" in
 			$1 != wanted && index($1, wanted ".") != 1 { print }
 		' "$MOCK_UCI_STATE" > "$tmp"
 		mv "$tmp" "$MOCK_UCI_STATE"
+		awk -F '\t' -v wanted="$key" '$1 != wanted { print }' "$MOCK_UCI_TYPES" > "$MOCK_UCI_TYPES.tmp.$$"
+		mv "$MOCK_UCI_TYPES.tmp.$$" "$MOCK_UCI_TYPES"
 		printf 'delete|%s\n' "$key" >> "$MOCK_UCI_CALLS"
+		;;
+	export)
+		printf "package 'liquid_formula'\n\nconfig global 'main'\n"
+		key=liquid_formula.main.subscription_url
+		type=$(awk -F '\t' -v wanted="$key" '$1 == wanted { value=$2 } END { print value }' "$MOCK_UCI_TYPES")
+		[ -n "$type" ] || type=option
+		awk -F '\t' -v wanted="$key" -v type="$type" '
+			$1 == wanted { printf "\t%s subscription_url \047%s\047\n", type, substr($0, index($0, "\t") + 1) }
+		' "$MOCK_UCI_STATE"
 		;;
 	commit)
 		printf 'commit|%s\n' "${1:-}" >> "$MOCK_UCI_CALLS"
-		printf 'uci-commit|%s\n' "${1:-}" >> "$MOCK_MIGRATION_EVENTS"
 		;;
 	*)
 		exit 2
@@ -198,32 +123,6 @@ case "$command" in
 esac
 EOF
 chmod 0755 "$MOCK_BIN/uci"
-
-cat > "$MOCK_BIN/mv" <<'EOF'
-#!/bin/sh
-set -u
-
-previous=
-last=
-for argument in "$@"; do
-	previous=$last
-	last=$argument
-done
-
-if [ -n "${MOCK_LEGACY_MARKER_PATH:-}" ] && [ "$last" = "$MOCK_LEGACY_MARKER_PATH" ]; then
-	mode=$(stat -c %a "$previous" 2>/dev/null || printf missing)
-	digest=$(sha256sum "$previous" 2>/dev/null || printf missing)
-	digest=${digest%% *}
-	printf 'marker-rename|%s|%s|%s|%s\n' \
-		"$(dirname "$previous")" "$mode" "$digest" "$last" >> "$MOCK_MIGRATION_EVENTS"
-	if [ "${MOCK_MARKER_MV_FAIL:-0}" = 1 ]; then
-		exit 74
-	fi
-fi
-
-exec "$SYSTEM_MV" "$@"
-EOF
-chmod 0755 "$MOCK_BIN/mv"
 
 cat > "$MOCK_ROOT/etc/init.d/liquid-formula" <<EOF
 #!/bin/sh
@@ -235,12 +134,17 @@ chmod 0755 "$MOCK_ROOT/etc/init.d/liquid-formula"
 cat > "$MOCK_ROOT/usr/share/liquid-formula/generate-config.sh" <<EOF
 #!/bin/sh
 printf 'generate\n' >> "$TEST_TMP/runtime.calls"
-printf 'generated by migration\n' > "$GENERATED_CONFIG"
 exit 0
 EOF
 chmod 0755 "$MOCK_ROOT/usr/share/liquid-formula/generate-config.sh"
 
 sed \
+	-e "s|/etc/config|$MOCK_ROOT/etc/config|g" \
+	-e "s|/etc/singbox-formula|$MOCK_ROOT/etc/singbox-formula|g" \
+	-e "s|/var/log/singbox-formula|$MOCK_ROOT/var/log/singbox-formula|g" \
+	-e "s|/var/lib/singbox-formula|$MOCK_ROOT/var/lib/singbox-formula|g" \
+	-e "s|/var/run/singbox-formula|$MOCK_ROOT/var/run/singbox-formula|g" \
+	-e "s|/etc/init.d/singbox-formula|$MOCK_ROOT/etc/init.d/singbox-formula|g" \
 	-e "s|/etc/liquid-formula|$MOCK_ROOT/etc/liquid-formula|g" \
 	-e "s|/var/lib/liquid-formula|$MOCK_ROOT/var/lib/liquid-formula|g" \
 	-e "s|/var/log/liquid-formula|$MOCK_ROOT/var/log/liquid-formula|g" \
@@ -253,14 +157,9 @@ chmod 0755 "$MIGRATION_UNDER_TEST"
 PATH="$MOCK_BIN:$PATH"
 MOCK_UCI_STATE="$UCI_STATE"
 MOCK_UCI_CALLS="$UCI_CALLS"
-MARKER_DIR="$MOCK_ROOT/var/lib/liquid-formula/subscriptions"
-MARKER_PATH="$MARKER_DIR/legacy-first-url.sha256"
-MOCK_LEGACY_MARKER_PATH="$MARKER_PATH"
-MOCK_MIGRATION_EVENTS="$MIGRATION_EVENTS"
-MOCK_MARKER_MV_FAIL=0
-export PATH MOCK_UCI_STATE MOCK_UCI_CALLS MOCK_LEGACY_MARKER_PATH
-export MOCK_MIGRATION_EVENTS MOCK_MARKER_MV_FAIL
-UCI_LIST_DELIMITER=$(printf '\037')
+MOCK_UCI_TYPES="$UCI_TYPES"
+export PATH MOCK_UCI_STATE MOCK_UCI_CALLS MOCK_UCI_TYPES \
+	MOCK_LEGACY_STOP_RC MOCK_LEGACY_DISABLE_RC
 
 cat > "$UCI_STATE" <<'EOF'
 liquid_formula.main	global
@@ -276,10 +175,9 @@ liquid_formula.openwrt.file	custom-openwrt.json
 liquid_formula.openwrt.no_node	Custom Direct
 EOF
 printf 'liquid_formula.main.subscription_url\t\n' >> "$UCI_STATE"
+printf 'liquid_formula.main.subscription_url\toption\n' > "$UCI_TYPES"
 : > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
 : > "$TEST_TMP/runtime.calls"
-printf 'user-edited generated config\n' > "$GENERATED_CONFIG"
 
 state_value() {
 	_key=$1
@@ -290,7 +188,6 @@ assert_state() {
 	_key=$1
 	_expected=$2
 	_description=$3
-	_actual='<missing>'
 	_actual=$(state_value "$_key" 2>/dev/null) || _actual='<missing>'
 	if [ "$_actual" = "$_expected" ]; then
 		record_ok "$_description"
@@ -309,290 +206,141 @@ assert_state_exists() {
 	fi
 }
 
-assert_state_missing() {
-	_key=$1
-	_description=$2
-	if state_value "$_key" >/dev/null 2>&1; then
-		record_failure "$_description (unexpected: $_key)"
-	else
-		record_ok "$_description"
-	fi
-}
-
-assert_uci_list_values() {
-	_key=$1
-	_expected=$2
-	_description=$3
-	_actual='<missing>'
-	if _actual=$(uci -q -d "$UCI_LIST_DELIMITER" get "$_key") &&
-		[ "$_actual" = "$_expected" ]; then
-		record_ok "$_description"
-	else
-		record_failure "$_description (expected '$_expected', got '$_actual')"
-	fi
-}
-
-assert_uci_missing() {
-	_key=$1
-	_description=$2
-	if uci -q get "$_key" >/dev/null 2>&1; then
-		record_failure "$_description (unexpected: $_key)"
-	else
-		record_ok "$_description"
-	fi
-}
-
-assert_export_main_lines() {
-	_option=$1
-	_expected=$2
-	_description=$3
-	_actual=$(uci -q export liquid_formula | awk -v wanted="$_option" '
-		$1 == "config" { in_main = ($3 == "\047main\047"); next }
-		in_main && ($1 == "option" || $1 == "list") && $2 == wanted {
-			line = $0
-			sub(/^[[:space:]]+/, "", line)
-			print line
-		}
-	')
-	if [ "$_actual" = "$_expected" ]; then
-		record_ok "$_description"
-	else
-		record_failure "$_description (expected '$_expected', got '$_actual')"
-	fi
-}
-
-assert_export_subscription_lines() {
-	_expected=$1
-	_description=$2
-	assert_export_main_lines subscription_url "$_expected" "$_description"
-}
-
-assert_subscription_migration_calls() {
-	_expected_add_value=$1
-	_description=$2
-	_actual=$(awk -F '|' '
-		$1 == "delete" && $2 == "liquid_formula.main.subscription_url" { print }
-		$1 == "add_list" && $2 == "liquid_formula.main.subscription_url" { print }
-	' "$UCI_CALLS")
-	_expected="delete|liquid_formula.main.subscription_url
-add_list|liquid_formula.main.subscription_url|$_expected_add_value"
-	if [ "$_actual" = "$_expected" ]; then
-		record_ok "$_description"
-	else
-		record_failure "$_description (expected delete then one add_list, got '$_actual')"
-	fi
-}
-
-assert_empty_subscription_migration_calls() {
-	_description=$1
-	_actual=$(awk -F '|' '
-		$1 == "delete" && $2 == "liquid_formula.main.subscription_url" { print }
-		$1 == "add_list" && $2 == "liquid_formula.main.subscription_url" { print }
-	' "$UCI_CALLS")
-	if [ "$_actual" = 'delete|liquid_formula.main.subscription_url' ]; then
-		record_ok "$_description"
-	else
-		record_failure "$_description (expected one delete and no add_list, got '$_actual')"
-	fi
-}
-
-assert_no_legacy_marker() {
-	_description=$1
-	assert_file_not_exists "$MARKER_PATH" "$_description"
-}
-
-assert_exact_legacy_marker() {
-	_expected_content=$1
-	_expected_file_sha=$2
-	_description=$3
-	assert_file_content "$_expected_content" "$MARKER_PATH" "$_description contains the exact scalar URL digest"
-	assert_file_sha256 "$_expected_file_sha" "$MARKER_PATH" "$_description contains exactly one digest plus newline"
-	assert_equal 600 "$(stat -c %a "$MARKER_PATH" 2>/dev/null)" "$_description has mode 0600"
-	assert_equal 700 "$(stat -c %a "$MARKER_DIR" 2>/dev/null)" "$_description uses a private state directory"
-}
-
-# Characterize the libuci edge that makes delete-before-add_list mandatory:
-# adding a list item to a scalar converts and retains that scalar as item one.
-printf 'liquid_formula.main.fixture_scalar\tfirst value\n' >> "$UCI_STATE"
-uci add_list 'liquid_formula.main.fixture_scalar=second value'
-assert_equal 'first value|second value' \
-	"$(uci -q -d '|' get liquid_formula.main.fixture_scalar)" \
-	'the UCI mock add_list operation retains a nonempty scalar as item one'
-assert_equal "liquid_formula.main.fixture_scalar='first value'|'second value'" \
-	"$(uci -q -d '|' show liquid_formula.main.fixture_scalar)" \
-	'the UCI mock show command joins converted list items on one line'
-assert_export_main_lines fixture_scalar "list fixture_scalar 'first value'
-list fixture_scalar 'second value'" 'the UCI mock export distinguishes the converted value as a list'
-uci delete liquid_formula.main.fixture_scalar
-
-printf 'liquid_formula.main.fixture_scalar\t\n' >> "$UCI_STATE"
-uci add_list 'liquid_formula.main.fixture_scalar=after-empty'
-assert_equal '|after-empty' \
-	"$(uci -q -d '|' get liquid_formula.main.fixture_scalar)" \
-	'the UCI mock add_list operation retains an empty scalar before the appended item'
-assert_export_main_lines fixture_scalar "list fixture_scalar ''
-list fixture_scalar 'after-empty'" 'the UCI mock export retains both list items after empty-scalar conversion'
-uci delete liquid_formula.main.fixture_scalar
-: > "$UCI_CALLS"
-
 "$MIGRATION_UNDER_TEST"
 
-assert_file_content 'user-edited generated config' "$GENERATED_CONFIG" \
-	'upgrade migration preserves an existing generated conffile'
-assert_not_contains "$TEST_TMP/runtime.calls" '^generate$' \
-	'upgrade migration does not regenerate an existing config.yaml'
+assert_file_content 'legacy uci sentinel' "$MOCK_ROOT/etc/config/liquid_formula" \
+	'migration copies the legacy UCI file before applying defaults'
+assert_file_content 'legacy uci sentinel' "$MOCK_ROOT/etc/config/singbox_formula.migrated" \
+	'migration preserves the renamed legacy UCI file as a backup'
+assert_file_content 'legacy config sentinel' "$MOCK_ROOT/etc/singbox-formula/config.yaml" \
+	'migration preserves the old configuration namespace for manual comparison'
+assert_file_content 'legacy log sentinel' "$MOCK_ROOT/var/log/singbox-formula/server.log" \
+	'migration preserves old logs for manual review'
+assert_file_content 'legacy state sentinel' "$MOCK_ROOT/var/lib/singbox-formula/state.json" \
+	'migration preserves old persistent state for manual review'
+assert_file_content 'legacy runtime sentinel' "$MOCK_ROOT/var/run/singbox-formula/owner" \
+	'migration does not recursively remove the old runtime namespace'
+assert_file_exists "$MOCK_ROOT/etc/init.d/singbox-formula" \
+	'migration leaves the disabled legacy init script for explicit cleanup'
+assert_contains "$TEST_TMP/legacy-init.calls" '^legacy-init\|stop$' \
+	'migration stops the legacy service before preserving it'
+assert_contains "$TEST_TMP/legacy-init.calls" '^legacy-init\|disable$' \
+	'migration disables the legacy service before preserving it'
+
+: > "$TEST_TMP/legacy-init.calls"
+MOCK_LEGACY_STOP_RC=73
+MOCK_LEGACY_DISABLE_RC=0
+export MOCK_LEGACY_STOP_RC MOCK_LEGACY_DISABLE_RC
+if "$MIGRATION_UNDER_TEST" >/dev/null 2>&1; then
+	record_failure 'migration rejects a failed legacy-service stop'
+else
+	record_ok 'migration rejects a failed legacy-service stop'
+fi
+assert_contains "$TEST_TMP/legacy-init.calls" '^legacy-init\|disable$' \
+	'migration still attempts to disable the legacy service after a stop failure'
+
+: > "$TEST_TMP/legacy-init.calls"
+MOCK_LEGACY_STOP_RC=0
+MOCK_LEGACY_DISABLE_RC=74
+export MOCK_LEGACY_STOP_RC MOCK_LEGACY_DISABLE_RC
+if "$MIGRATION_UNDER_TEST" >/dev/null 2>&1; then
+	record_failure 'migration rejects a failed legacy-service disable'
+else
+	record_ok 'migration rejects a failed legacy-service disable'
+fi
+assert_contains "$TEST_TMP/legacy-init.calls" '^legacy-init\|stop$' \
+	'migration attempts to stop the legacy service before a disable failure'
+MOCK_LEGACY_STOP_RC=0
+MOCK_LEGACY_DISABLE_RC=0
+export MOCK_LEGACY_STOP_RC MOCK_LEGACY_DISABLE_RC
 
 assert_state liquid_formula.main.port 9000 'migration preserves an explicitly selected legacy port'
 assert_state liquid_formula.main.output_config /etc/sing-box/config.json 'migration preserves an explicitly selected legacy output path'
 assert_state liquid_formula.main.password custom-password 'migration preserves an explicit password'
-assert_uci_missing liquid_formula.main.subscription_url 'migration removes a legacy empty subscription scalar as a zero-item list'
-assert_export_subscription_lines '' 'a migrated empty scalar exports no subscription_url option or list'
-assert_empty_subscription_migration_calls 'empty scalar migration performs one delete and never adds an empty list item'
+assert_state liquid_formula.main.subscription_url '' 'migration preserves an explicitly empty subscription URL'
 assert_state liquid_formula.main.default_template openwrt 'migration preserves the explicit default template choice'
 assert_state liquid_formula.openwrt.file custom-openwrt.json 'migration does not delete or rewrite a custom legacy template'
 assert_state liquid_formula.main.boot_delay 90 'migration fills a missing boot delay'
 assert_state liquid_formula.main.subscription_timeout 60 'migration fills a missing subscription timeout'
 assert_state liquid_formula.main.template_base_url http://127.0.0.1/liquid-formula/templates 'migration fills a missing template base URL'
+assert_state liquid_formula.main.user_agent v2rayN/7.24.4 'migration fills a missing User-Agent with the current v2rayN default'
 assert_state liquid_formula.momo_template.file momo-template.json 'migration adds the missing packaged template without removing user sections'
 assert_state liquid_formula.momo_template.enabled 1 'migration enables the packaged momo template'
 assert_state liquid_formula.localdns_template.file localdns-template.json 'migration adds the missing local DNS template'
 assert_state liquid_formula.localdns_template.enabled 1 'migration enables the packaged local DNS template'
-assert_no_legacy_marker 'an empty legacy scalar creates no adoption marker'
 
-# Normalize the fixture to the required zero-item representation before the
-# idempotence run, even when the pre-feature product left its scalar behind.
-awk -F '\t' 'index($1, "liquid_formula.main.subscription_url") != 1 { print }' "$UCI_STATE" > "$UCI_STATE.next"
-mv "$UCI_STATE.next" "$UCI_STATE"
 : > "$UCI_CALLS"
 "$MIGRATION_UNDER_TEST"
 assert_empty "$(cat "$UCI_CALLS")" 'a second migration run performs no UCI writes or commit'
-assert_uci_missing liquid_formula.main.subscription_url 'a second migration run keeps the zero-item subscription list omitted'
-assert_no_legacy_marker 'an absent subscription value creates no adoption marker'
 
-# A pre-1.8.4 scalar must become exactly the first (and only) list item.  The
-# URL deliberately includes the characters providers commonly put in tokens;
-# migration must not shell-evaluate, decode, or truncate it.
+# 1.8.5 stored subscription_url as an ordered UCI list. Plan A keeps the first
+# item, converts it back to a scalar option and leaves the service switch alone.
 cat > "$UCI_STATE" <<'EOF'
 liquid_formula.main	global
-liquid_formula.main.subscription_url	https://provider.example/sub?token=O%27Brien&region=東京
+liquid_formula.main.enabled	1
+liquid_formula.main.subscription_url	https://first.example/sub?token=one
+liquid_formula.main.subscription_url	https://second.example/sub?token=two
+liquid_formula.main.user_agent	sing-box 1.11.0
 EOF
+printf 'liquid_formula.main.subscription_url\tlist\n' > "$UCI_TYPES"
 : > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-"$MIGRATION_UNDER_TEST"
-assert_uci_list_values liquid_formula.main.subscription_url 'https://provider.example/sub?token=O%27Brien&region=東京' 'migration preserves the complete legacy URL as the only list item'
-assert_export_subscription_lines "list subscription_url 'https://provider.example/sub?token=O%27Brien&region=東京'" 'the migrated nonempty scalar exports as exactly one list item'
-assert_subscription_migration_calls 'https://provider.example/sub?token=O%27Brien&region=東京' 'nonempty migration deletes the scalar before one add_list call'
-assert_exact_legacy_marker \
-	'bf65ef88a81c819a57cb5c2e05ed8d152436b3d43bc0f6f01f52cbbe07a1c85e' \
-	'175b1bab2ad1934314bf3b506b6c887159a61138e1d4b90e6d393398ca66c46f' \
-	'the scalar migration marker'
-assert_equal "uci-commit|liquid_formula
-marker-rename|$MARKER_DIR|600|175b1bab2ad1934314bf3b506b6c887159a61138e1d4b90e6d393398ca66c46f|$MARKER_PATH" \
-	"$(cat "$MIGRATION_EVENTS")" \
-	'the marker is staged privately and atomically renamed only after the UCI commit'
-marker_identity=$(stat -c '%i:%Y' "$MARKER_PATH" 2>/dev/null || printf missing)
-: > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-"$MIGRATION_UNDER_TEST"
-assert_empty "$(cat "$UCI_CALLS")" 'the converted subscription list makes a second migration run zero-write'
-assert_uci_list_values liquid_formula.main.subscription_url 'https://provider.example/sub?token=O%27Brien&region=東京' 'the second run cannot duplicate the migrated list item'
-assert_equal "$marker_identity" "$(stat -c '%i:%Y' "$MARKER_PATH" 2>/dev/null || printf missing)" 'an idempotent list migration does not replace the existing marker'
-assert_empty "$(cat "$MIGRATION_EVENTS")" 'an idempotent list migration performs no marker write'
-
-# Marker publication is deliberately after the irreversible UCI commit.  If
-# the atomic marker rename fails, the migration reports failure but keeps the
-# exact one-item list rather than attempting an unsafe rollback to a scalar.
-rm -rf "$MARKER_DIR"
-cat > "$UCI_STATE" <<'EOF'
-liquid_formula.main	global
-liquid_formula.main.subscription_url	https://failure.example/sub?token=still-committed
-EOF
-: > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-MOCK_MARKER_MV_FAIL=1
-export MOCK_MARKER_MV_FAIL
-if "$MIGRATION_UNDER_TEST" >"$TEST_TMP/marker-failure.stdout" 2>"$TEST_TMP/marker-failure.stderr"; then
-	record_failure 'a legacy marker rename failure is reported'
-else
-	record_ok 'a legacy marker rename failure is reported'
-fi
-assert_uci_list_values liquid_formula.main.subscription_url \
-	'https://failure.example/sub?token=still-committed' \
-	'a marker write failure keeps the already-committed one-item URL list'
-assert_export_subscription_lines \
-	"list subscription_url 'https://failure.example/sub?token=still-committed'" \
-	'a marker write failure does not revert the committed list type'
-assert_equal '1' "$(awk -F '|' '$1 == "commit" && $2 == "liquid_formula" { count++ } END { print count + 0 }' "$UCI_CALLS")" \
-	'a marker write failure occurs after exactly one durable UCI commit'
-assert_equal "uci-commit|liquid_formula
-marker-rename|$MARKER_DIR|600|e5d9f11c5c380e6600b39501b3d8f3d3c06c82f89767696a306224c7fb6704fa|$MARKER_PATH" \
-	"$(cat "$MIGRATION_EVENTS")" \
-	'the failed marker rename was attempted after the UCI commit with complete mode-0600 bytes'
-assert_no_legacy_marker 'a failed marker rename exposes no partial adoption marker'
-MOCK_MARKER_MV_FAIL=0
-export MOCK_MARKER_MV_FAIL
-
-# Once a list exists it is authoritative.  A migration rerun must neither add
-# a legacy scalar nor rewrite an ordered list that another upgrade already made.
-rm -rf "$MARKER_DIR"
-awk -F '\t' 'index($1, "liquid_formula.main.subscription_url") != 1 { print }' "$UCI_STATE" > "$UCI_STATE.next"
-mv "$UCI_STATE.next" "$UCI_STATE"
-printf 'liquid_formula.main.subscription_url.__list.1\thttps://first.example/sub?token=one&city=東京\n' >> "$UCI_STATE"
-printf "liquid_formula.main.subscription_url.__list.2\t  https://second.example/O'Brien?encoded=%%27&label=two words  \n" >> "$UCI_STATE"
-: > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-assert_equal "https://first.example/sub?token=one&city=東京   https://second.example/O'Brien?encoded=%27&label=two words  " \
-	"$(uci -q get liquid_formula.main.subscription_url)" \
-	'the UCI mock get command retains whitespace inside list values'
-assert_equal "liquid_formula.main.subscription_url='https://first.example/sub?token=one&city=東京' '  https://second.example/O'\\''Brien?encoded=%27&label=two words  '" \
-	"$(uci -q show liquid_formula.main.subscription_url)" \
-	'the UCI mock show command quotes each whitespace-bearing list item separately'
-assert_equal "https://first.example/sub?token=one&city=東京|  https://second.example/O'Brien?encoded=%27&label=two words  " \
-	"$(uci -q -d '|' get liquid_formula.main.subscription_url)" \
-	'the UCI mock custom delimiter does not trim list item bytes'
-"$MIGRATION_UNDER_TEST"
-assert_uci_list_values liquid_formula.main.subscription_url \
-	"https://first.example/sub?token=one&city=東京${UCI_LIST_DELIMITER}  https://second.example/O'Brien?encoded=%27&label=two words  " \
-	'migration never rewrites an already-migrated ordered URL list'
-assert_export_subscription_lines "list subscription_url 'https://first.example/sub?token=one&city=東京'
-list subscription_url '  https://second.example/O'\\''Brien?encoded=%27&label=two words  '" 'an existing ordered list keeps whitespace and list syntax in export'
-assert_empty "$(cat "$UCI_CALLS")" 'an existing subscription list skips scalar migration and all UCI writes'
-assert_no_legacy_marker 'an existing multi-item list creates no legacy marker'
-assert_empty "$(cat "$MIGRATION_EVENTS")" 'an existing multi-item list performs no marker write'
-
-# A one-item list has the same get/show text as a scalar.  Keeping it zero-write
-# proves migration used export type information instead of delimiter heuristics.
-awk -F '\t' 'index($1, "liquid_formula.main.subscription_url") != 1 { print }' "$UCI_STATE" > "$UCI_STATE.next"
-mv "$UCI_STATE.next" "$UCI_STATE"
-printf 'liquid_formula.main.subscription_url.__list.1\t  https://single.example/sub?token=one&city=京都  \n' >> "$UCI_STATE"
-: > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-"$MIGRATION_UNDER_TEST"
-assert_uci_list_values liquid_formula.main.subscription_url '  https://single.example/sub?token=one&city=京都  ' 'migration preserves every byte of the sole whitespace-bearing list item'
-assert_export_subscription_lines "list subscription_url '  https://single.example/sub?token=one&city=京都  '" 'a one-item existing list retains quoted list syntax and whitespace in export'
-assert_empty "$(cat "$UCI_CALLS")" 'a one-item existing list remains zero-write and therefore requires export type detection'
-assert_no_legacy_marker 'an existing one-item list creates no legacy marker'
-assert_empty "$(cat "$MIGRATION_EVENTS")" 'an existing one-item list performs no marker write'
-
-# A package that never had the scalar option must remain a zero-item list and
-# must not fabricate the digest of an empty string as a legacy adoption marker.
-cat > "$UCI_STATE" <<'EOF'
-liquid_formula.main	global
-EOF
-rm -rf "$MARKER_DIR"
-: > "$UCI_CALLS"
-: > "$MIGRATION_EVENTS"
-rm -f "$GENERATED_CONFIG"
 : > "$TEST_TMP/runtime.calls"
 "$MIGRATION_UNDER_TEST"
-assert_uci_missing liquid_formula.main.subscription_url 'a fresh install leaves the URL list empty instead of creating an empty scalar'
-assert_export_subscription_lines '' 'a fresh install exports no subscription_url entry'
-assert_no_legacy_marker 'a fresh install creates no legacy marker'
-assert_empty "$(cat "$MIGRATION_EVENTS" | awk -F '|' '$1 == "marker-rename" { print }')" 'a fresh install never attempts marker publication'
-assert_file_content 'generated by migration' "$GENERATED_CONFIG" \
-	'a fresh install generates its initial config.yaml'
-assert_contains "$TEST_TMP/runtime.calls" '^generate$' \
-	'a fresh install invokes the config generator exactly when config.yaml is absent'
+assert_state liquid_formula.main.subscription_url 'https://first.example/sub?token=one' '1.8.5 list migration keeps the first subscription URL'
+assert_state liquid_formula.main.enabled 1 '1.8.5 list migration preserves the enabled state'
+assert_equal option "$(awk -F '\t' '$1 == "liquid_formula.main.subscription_url" { print $2 }' "$UCI_TYPES")" '1.8.5 list migration converts the URL back to a scalar option'
+assert_not_contains "$UCI_STATE" 'second\.example' '1.8.5 list migration discards later subscription URLs under Plan A'
+
+# A gateway-generated YAML is backed up once and regenerated; an ordinary
+# custom conffile is not touched merely because the package is upgraded.
+mkdir -p "$MOCK_ROOT/etc/liquid-formula"
+cat > "$MOCK_ROOT/etc/liquid-formula/config.yaml" <<'EOF'
+# Generated by /usr/share/liquid-formula/generate-config.sh
+subscription:
+  url: 'http://127.0.0.1:9717/v1/aggregate'
+liquid_formula_gateway:
+  listen_port: 9717
+EOF
+: > "$TEST_TMP/runtime.calls"
+"$MIGRATION_UNDER_TEST"
+assert_file_exists "$MOCK_ROOT/etc/liquid-formula/config.yaml.pre-1.8.6" 'gateway YAML is backed up before scalar regeneration'
+assert_equal 600 "$(stat -c %a "$MOCK_ROOT/etc/liquid-formula/config.yaml.pre-1.8.6" 2>/dev/null)" 'gateway YAML backup is mode 0600'
+assert_contains "$TEST_TMP/runtime.calls" '^generate$' 'gateway YAML migration invokes the scalar generator'
+printf 'sentinel backup\n' > "$MOCK_ROOT/etc/liquid-formula/config.yaml.pre-1.8.6"
+"$MIGRATION_UNDER_TEST"
+assert_file_content 'sentinel backup' "$MOCK_ROOT/etc/liquid-formula/config.yaml.pre-1.8.6" 'gateway YAML backup is never overwritten'
+
+cat > "$MOCK_ROOT/etc/liquid-formula/config.yaml" <<'EOF'
+# user-maintained converter configuration
+custom: true
+EOF
+: > "$TEST_TMP/runtime.calls"
+"$MIGRATION_UNDER_TEST"
+assert_not_contains "$TEST_TMP/runtime.calls" '^generate$' 'ordinary custom config.yaml is preserved without regeneration'
+
+check_ua_migration() {
+	old=$1 new=$2 description=$3
+	cat > "$UCI_STATE" <<EOF
+liquid_formula.main	global
+liquid_formula.main.enabled	0
+liquid_formula.main.user_agent	$old
+EOF
+	printf 'liquid_formula.main.subscription_url\t\n' >> "$UCI_STATE"
+	printf 'liquid_formula.main.subscription_url\toption\n' > "$UCI_TYPES"
+	: > "$UCI_CALLS"
+	"$MIGRATION_UNDER_TEST"
+	assert_state liquid_formula.main.user_agent "$new" "$description"
+}
+
+check_ua_migration 'sing-box 1.11.0' 'sing-box 1.13.15' 'migration refreshes the old sing-box preset'
+check_ua_migration 'SFI/1.11.0 (sing-box 1.11.0)' 'SFI/1.13.15 (sing-box 1.13.15)' 'migration refreshes the old SFI preset'
+check_ua_migration 'SFA/1.11.0 (sing-box 1.11.0)' 'SFA/1.13.15 (sing-box 1.13.15)' 'migration refreshes the old SFA preset'
+check_ua_migration 'SFM/1.11.0 (sing-box 1.11.0)' 'SFM/1.13.15 (sing-box 1.13.15)' 'migration refreshes the old SFM preset'
+check_ua_migration 'v2rayN/7.0.0' 'v2rayN/7.24.4' 'migration refreshes the old v2rayN preset'
+check_ua_migration 'v2rayNG/1.9.16' 'v2rayNG/2.2.6' 'migration refreshes the old v2rayNG preset'
+check_ua_migration 'Karing/1.0.0' 'Karing/1.2.23.2605' 'migration refreshes the old Karing preset'
+check_ua_migration 'ProviderCustom/99.1' 'ProviderCustom/99.1' 'migration preserves a custom provider User-Agent'
+check_ua_migration '' '' 'migration preserves an explicitly empty User-Agent'
 
 # Exercise the DPI uci-defaults migration as a real script. A fake default
 # route is present specifically to prove fresh installs no longer copy a
@@ -603,7 +351,30 @@ DPI_UCI_STATE="$TEST_TMP/dpi-uci.state"
 DPI_UCI_CALLS="$TEST_TMP/dpi-uci.calls"
 DPI_ROUTE_FILE="$TEST_TMP/proc-net-route"
 DPI_MIGRATION_UNDER_TEST="$TEST_TMP/99-liquid-formula-dpi"
+DPI_MOCK_INIT_LOG="$TEST_TMP/dpi-init.calls"
 mkdir -p "$DPI_MOCK_BIN" "$DPI_MOCK_ROOT/etc/init.d"
+
+install_dpi_legacy_init() {
+	cat >"$DPI_MOCK_ROOT/etc/init.d/taoistfuchen-boot-delay" <<'EOF'
+#!/bin/sh
+printf 'legacy|%s\n' "${1:-}" >>"$DPI_MOCK_INIT_LOG"
+case "${1:-}" in
+	stop) exit "${DPI_MOCK_LEGACY_STOP_RC:-0}" ;;
+	disable) exit "${DPI_MOCK_LEGACY_DISABLE_RC:-0}" ;;
+esac
+exit 2
+EOF
+	chmod 0755 "$DPI_MOCK_ROOT/etc/init.d/taoistfuchen-boot-delay"
+}
+
+for dpi_service in liquid-formula-boot-delay fakehttp fakesip; do
+	cat >"$DPI_MOCK_ROOT/etc/init.d/$dpi_service" <<'EOF'
+#!/bin/sh
+printf 'current|%s|%s\n' "${0##*/}" "${1:-}" >>"$DPI_MOCK_INIT_LOG"
+exit 0
+EOF
+	chmod 0755 "$DPI_MOCK_ROOT/etc/init.d/$dpi_service"
+done
 
 cat >"$DPI_MOCK_BIN/uci" <<'EOF'
 #!/bin/sh
@@ -704,7 +475,10 @@ chmod 0755 "$DPI_MIGRATION_UNDER_TEST"
 
 DPI_MOCK_UCI_STATE="$DPI_UCI_STATE"
 DPI_MOCK_UCI_CALLS="$DPI_UCI_CALLS"
-export DPI_MOCK_UCI_STATE DPI_MOCK_UCI_CALLS
+DPI_MOCK_LEGACY_STOP_RC=0
+DPI_MOCK_LEGACY_DISABLE_RC=0
+export DPI_MOCK_UCI_STATE DPI_MOCK_UCI_CALLS DPI_MOCK_INIT_LOG \
+	DPI_MOCK_LEGACY_STOP_RC DPI_MOCK_LEGACY_DISABLE_RC
 
 dpi_state_value() {
 	awk -F '\t' -v wanted="$1" '
@@ -717,6 +491,64 @@ dpi_list_value() {
 	"$DPI_MOCK_BIN/uci" -q get "$1" 2>/dev/null || true
 }
 
+reset_dpi_legacy_fixture() {
+	rm -rf "$DPI_MOCK_ROOT/etc/taoistfuchen/fakehttp-payloads" \
+		"$DPI_MOCK_ROOT/etc/liquid-formula/fakehttp-payloads"
+	mkdir -p "$DPI_MOCK_ROOT/etc/taoistfuchen/fakehttp-payloads"
+	printf 'legacy payload sentinel\n' > \
+		"$DPI_MOCK_ROOT/etc/taoistfuchen/fakehttp-payloads/custom.bin"
+	install_dpi_legacy_init
+	: >"$DPI_MOCK_INIT_LOG"
+	cat >"$DPI_UCI_STATE" <<'EOF'
+fakehttp.main.__type	fakehttp
+fakehttp.payload1.__type	payload
+fakesip.main.__type	fakesip
+EOF
+	: >"$DPI_UCI_CALLS"
+}
+
+reset_dpi_legacy_fixture
+DPI_MOCK_LEGACY_STOP_RC=73
+DPI_MOCK_LEGACY_DISABLE_RC=0
+export DPI_MOCK_LEGACY_STOP_RC DPI_MOCK_LEGACY_DISABLE_RC
+if PATH="$DPI_MOCK_BIN:$PATH" "$DPI_MIGRATION_UNDER_TEST" >/dev/null 2>&1; then
+	record_failure 'DPI migration rejects a failed legacy-scheduler stop'
+else
+	record_ok 'DPI migration rejects a failed legacy-scheduler stop'
+fi
+assert_contains "$DPI_MOCK_INIT_LOG" '^legacy\|disable$' \
+	'DPI migration still attempts legacy disable after a stop failure'
+assert_file_exists "$DPI_MOCK_ROOT/etc/init.d/taoistfuchen-boot-delay" \
+	'DPI migration preserves the legacy init after a stop failure'
+assert_file_content 'legacy payload sentinel' \
+	"$DPI_MOCK_ROOT/etc/taoistfuchen/fakehttp-payloads/custom.bin" \
+	'DPI migration leaves the legacy payload in place after a stop failure'
+assert_not_contains "$DPI_MOCK_INIT_LOG" '^current\|' \
+	'DPI migration starts no current service after a stop failure'
+
+reset_dpi_legacy_fixture
+DPI_MOCK_LEGACY_STOP_RC=0
+DPI_MOCK_LEGACY_DISABLE_RC=74
+export DPI_MOCK_LEGACY_STOP_RC DPI_MOCK_LEGACY_DISABLE_RC
+if PATH="$DPI_MOCK_BIN:$PATH" "$DPI_MIGRATION_UNDER_TEST" >/dev/null 2>&1; then
+	record_failure 'DPI migration rejects a failed legacy-scheduler disable'
+else
+	record_ok 'DPI migration rejects a failed legacy-scheduler disable'
+fi
+assert_contains "$DPI_MOCK_INIT_LOG" '^legacy\|stop$' \
+	'DPI migration attempts legacy stop before a disable failure'
+assert_file_exists "$DPI_MOCK_ROOT/etc/init.d/taoistfuchen-boot-delay" \
+	'DPI migration preserves the legacy init after a disable failure'
+assert_file_content 'legacy payload sentinel' \
+	"$DPI_MOCK_ROOT/etc/taoistfuchen/fakehttp-payloads/custom.bin" \
+	'DPI migration leaves the legacy payload in place after a disable failure'
+assert_not_contains "$DPI_MOCK_INIT_LOG" '^current\|' \
+	'DPI migration starts no current service after a disable failure'
+
+reset_dpi_legacy_fixture
+DPI_MOCK_LEGACY_STOP_RC=0
+DPI_MOCK_LEGACY_DISABLE_RC=0
+export DPI_MOCK_LEGACY_STOP_RC DPI_MOCK_LEGACY_DISABLE_RC
 cat >"$DPI_UCI_STATE" <<'EOF'
 fakehttp.main.__type	fakehttp
 fakehttp.payload1.__type	payload
@@ -724,6 +556,15 @@ fakesip.main.__type	fakesip
 EOF
 : >"$DPI_UCI_CALLS"
 PATH="$DPI_MOCK_BIN:$PATH" "$DPI_MIGRATION_UNDER_TEST"
+assert_contains "$DPI_MOCK_INIT_LOG" '^legacy\|stop$' \
+	'DPI migration stops the legacy scheduler before retiring it'
+assert_contains "$DPI_MOCK_INIT_LOG" '^legacy\|disable$' \
+	'DPI migration disables the legacy scheduler before retiring it'
+assert_file_not_exists "$DPI_MOCK_ROOT/etc/init.d/taoistfuchen-boot-delay" \
+	'DPI migration removes the legacy init only after a successful retirement'
+assert_file_content 'legacy payload sentinel' \
+	"$DPI_MOCK_ROOT/etc/liquid-formula/fakehttp-payloads/custom.bin" \
+	'DPI migration moves the legacy payload after retiring the old scheduler'
 assert_equal auto "$(dpi_state_value fakehttp.main.interface_mode)" \
 	'fresh FakeHTTP installation defaults to official WAN auto mode'
 assert_equal auto "$(dpi_state_value fakesip.main.interface_mode)" \
@@ -760,29 +601,6 @@ assert_equal manual-http0 "$(dpi_list_value fakehttp.main.interface)" \
 assert_equal manual-sip0 "$(dpi_list_value fakesip.main.interface)" \
 	'migration preserves the existing FakeSIP manual list exactly'
 
-# Existing empty options are still explicit UCI values. Additive migration may
-# leave them for the normal validator/UI to report, but must not silently turn
-# them into new package defaults during an upgrade.
-{
-	printf 'fakehttp.main.__type\tfakehttp\n'
-	printf 'fakehttp.main.interface_mode\t\n'
-	printf 'fakehttp.main.direction\t\n'
-	printf 'fakehttp.payload1.__type\tpayload\n'
-	printf 'fakesip.main.__type\tfakesip\n'
-	printf 'fakesip.main.interface_mode\t\n'
-	printf 'fakesip.main.ports\t\n'
-} >"$DPI_UCI_STATE"
-: >"$DPI_UCI_CALLS"
-PATH="$DPI_MOCK_BIN:$PATH" "$DPI_MIGRATION_UNDER_TEST"
-assert_equal '' "$(dpi_state_value fakehttp.main.interface_mode)" \
-	'migration preserves an explicitly empty FakeHTTP interface mode'
-assert_equal '' "$(dpi_state_value fakehttp.main.direction)" \
-	'migration preserves an explicitly empty FakeHTTP direction'
-assert_equal '' "$(dpi_state_value fakesip.main.interface_mode)" \
-	'migration preserves an explicitly empty FakeSIP interface mode'
-assert_equal '' "$(dpi_state_value fakesip.main.ports)" \
-	'migration preserves an explicitly empty FakeSIP port list'
-
 assert_make_block_contains \
 	"$PACKAGE_MAKEFILE" \
 	'Package/liquid-formula/conffiles' \
@@ -798,6 +616,16 @@ assert_make_block_contains \
 	'Package/liquid-formula/install' \
 	'run-delayed\.sh.*run-delayed\.sh' \
 	'installs the managed boot delay helper'
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
+	'Package/liquid-formula/postinst' \
+	'/etc/uci-defaults/99-liquid-formula[[:space:]]+>/dev/null[[:space:]]+2>&1[[:space:]]+\|\|[[:space:]]*exit[[:space:]]+1' \
+	'package installation propagates a failed configuration migration'
+assert_make_block_contains \
+	"$PACKAGE_MAKEFILE" \
+	'Package/liquid-formula/postinst' \
+	'/etc/uci-defaults/99-liquid-formula-dpi[[:space:]]+>/dev/null[[:space:]]+2>&1[[:space:]]+\|\|[[:space:]]*exit[[:space:]]+1' \
+	'package installation propagates a failed DPI migration'
 
 LUCI_POSTINST="$TEST_TMP/luci-postinst.sh"
 RPCD_INIT="$TEST_TMP/rpcd"

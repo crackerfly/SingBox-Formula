@@ -154,14 +154,6 @@ assert_contains "$BUILD_ACTION" 'loongarch64_\*\)' "build action verifies loonga
 assert_contains "$BUILD_ACTION" 'riscv64_\*\)' "build action verifies riscv binaries"
 assert_contains "$BUILD_ACTION" 'mipsel_\*\)' "build action distinguishes little endian mips"
 assert_contains "$BUILD_ACTION" 'for ext in apk ipk' "build action accepts both apk and ipk output"
-assert_contains \
-	"$BUILD_ACTION" \
-	'name liquid-formula-subscription-gateway -perm -111' \
-	"build action requires the cross-compiled subscription gateway"
-assert_contains \
-	"$BUILD_ACTION" \
-	'Subscription gateway ELF does not match' \
-	"build action rejects a subscription gateway for the wrong architecture"
 
 # Release assets must be self-identifying once downloaded.
 assert_contains "$BUILD_ACTION" 'PKG_VERSION.*sed -n' "build action reads the package version from the Makefile"

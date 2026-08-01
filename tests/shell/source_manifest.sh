@@ -28,7 +28,7 @@ write_source_manifest() {
 		return 1
 	}
 
-	if ! find "$manifest_root" \( -type f -o -type l \) -exec sh -c '
+	if ! find "$manifest_root" -type f -exec sh -c '
 		root=$1
 		output=$2
 		shift 2
@@ -44,18 +44,13 @@ write_source_manifest() {
 				exit 1
 				;;
 			esac
-			if [ -L "$file" ]; then
-				git_mode=120000
-				hash=$(readlink "$file" | sha256sum) || exit 1
-			else
-				mode=$(stat -c %a "$file") || exit 1
-				case $mode in
-					644) git_mode=100644 ;;
-					755) git_mode=100755 ;;
-					*) git_mode=unsupported-$mode ;;
-				esac
-				hash=$(sha256sum < "$file") || exit 1
-			fi
+			mode=$(stat -c %a "$file") || exit 1
+			case $mode in
+				644) git_mode=100644 ;;
+				755) git_mode=100755 ;;
+				*) git_mode=unsupported-$mode ;;
+			esac
+			hash=$(sha256sum < "$file") || exit 1
 			hash=${hash%% *}
 			printf "%s\t%s\t%s\n" "$relative_path" "$git_mode" "$hash" >> "$output" || exit 1
 		done

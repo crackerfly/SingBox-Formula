@@ -10,22 +10,28 @@
 	uci -q set customlogo.main.enabled=0
 uci -q commit customlogo
 
-# 调优默认值以系统当前实际状态为准, 这样装完打开页面看到的就是真实情况,
-# 而不是一组凭空写死、和运行时对不上的推荐值。
+# TCP Fast Open 仍以当前内核值为准；其余三项使用产品支持的固定集合。
+# `uci get` 的退出状态用于区分“缺失”和“显式空值”，升级不能改写后者。
 seed_from_proc() {
 	local option="$1" proc_path="$2" fallback="$3" value=''
-	[ -z "$(uci -q get tuning.main.$option)" ] || return 0
+	uci -q get "tuning.main.$option" >/dev/null 2>&1 && return 0
 	[ -r "$proc_path" ] && value="$(head -n 1 "$proc_path" 2>/dev/null | tr -d '\r')"
 	[ -n "$value" ] || value="$fallback"
+	uci -q set "tuning.main.$option=$value"
+}
+
+seed_missing() {
+	local option="$1" value="$2"
+	uci -q get "tuning.main.$option" >/dev/null 2>&1 && return 0
 	uci -q set "tuning.main.$option=$value"
 }
 
 [ -n "$(uci -q get tuning.main 2>/dev/null)" ] || uci -q set tuning.main=tuning
 [ -n "$(uci -q get tuning.main.enabled)" ] || uci -q set tuning.main.enabled=0
 seed_from_proc tcp_fastopen        /proc/sys/net/ipv4/tcp_fastopen           3
-seed_from_proc default_qdisc       /proc/sys/net/core/default_qdisc          cake
-seed_from_proc congestion_control  /proc/sys/net/ipv4/tcp_congestion_control bbr
-seed_from_proc tcp_max_syn_backlog /proc/sys/net/ipv4/tcp_max_syn_backlog    512
+seed_missing default_qdisc cake
+seed_missing congestion_control bbr
+seed_missing tcp_max_syn_backlog 512
 
 # irqbalance 开关如实反映它自己的配置, 不替用户做决定。
 if [ -z "$(uci -q get tuning.main.irqbalance)" ]; then

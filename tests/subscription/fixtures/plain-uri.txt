@@ -1,9 +1,0 @@
-# Valid nodes remain in source order.
-ss://YWVzLTI1Ni1nY206cHctc2FmZQ@192.0.2.10:8388#Plain-SS
-anytls://plain-anytls-password@anytls.example:443?sni=anytls.example#Plain-AnyTLS
-socks5://plain-user:plain-password@socks.example:1080#Plain-SOCKS
-vless://11111111-2222-3333-4444-555555555555@vless.example:443?encryption=none&security=tls&sni=vless.example#Plain-VLESS
-
-# These entries must be skipped without echoing their contents.
-ssr://c2Vuc2l0aXZlLXNzcg
-unknown://plain-secret-token@unknown.example:443#Unknown

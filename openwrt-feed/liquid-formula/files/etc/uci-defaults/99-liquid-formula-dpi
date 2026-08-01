@@ -8,24 +8,28 @@
 
 set_default() {
 	local package="$1" section="$2" option="$3" value="$4"
-	uci -q get "$package.$section.$option" >/dev/null 2>&1 || \
+	[ -n "$(uci -q get "$package.$section.$option")" ] || \
 		uci -q set "$package.$section.$option=$value"
 }
 
 # --- 从 luci-app-taoistfuchen 迁移 -------------------------------------------
+# 旧包的调度器不能与新包并存: 两者会抢同一份 nft 表和同一个生命周期锁。
+# stop 和 disable 都必须尝试；任一失败都保留旧 init 和 payload，且不得启动新服务。
+if [ -x /etc/init.d/taoistfuchen-boot-delay ]; then
+	legacy_scheduler_rc=0
+	/etc/init.d/taoistfuchen-boot-delay stop >/dev/null 2>&1 || legacy_scheduler_rc=1
+	/etc/init.d/taoistfuchen-boot-delay disable >/dev/null 2>&1 || legacy_scheduler_rc=1
+	[ "$legacy_scheduler_rc" -eq 0 ] || exit 1
+	rm -f /etc/init.d/taoistfuchen-boot-delay || exit 1
+fi
+
 # payload 目录换到新命名空间。用户放进去的 .bin 必须跟着搬, 否则界面里已选
-# 中的 payload 会指向不存在的文件。
+# 中的 payload 会指向不存在的文件。必须在旧调度器安全退休之后执行，避免迁移
+# 失败时同时破坏旧服务的配置来源。
 if [ -d /etc/taoistfuchen/fakehttp-payloads ] && [ ! -d /etc/liquid-formula/fakehttp-payloads ]; then
 	mkdir -p /etc/liquid-formula || exit 1
 	mv /etc/taoistfuchen/fakehttp-payloads /etc/liquid-formula/fakehttp-payloads || exit 1
 	logger -t liquid-formula-dpi "migrated fakehttp payload directory"
-fi
-
-# 旧包的调度器不能与新包并存: 两者会抢同一份 nft 表和同一个生命周期锁。
-if [ -x /etc/init.d/taoistfuchen-boot-delay ]; then
-	/etc/init.d/taoistfuchen-boot-delay stop >/dev/null 2>&1
-	/etc/init.d/taoistfuchen-boot-delay disable >/dev/null 2>&1
-	rm -f /etc/init.d/taoistfuchen-boot-delay
 fi
 
 # payload 是原样注入网络的字节, 不该让非 root 读写。
@@ -35,15 +39,15 @@ chmod 0700 /etc/liquid-formula/fakehttp-payloads 2>/dev/null || true
 # --- 接口模式迁移 ------------------------------------------------------------
 # 新装使用 netifd 的官方默认 WAN 解析。老版本若保存过手动设备列表，则把它
 # 明确归类为 selected；列表本身不删除也不补写，切回手动模式仍可原样使用。
-if ! uci -q get fakehttp.main.interface_mode >/dev/null 2>&1; then
-	if uci -q get fakehttp.main.interface >/dev/null 2>&1; then
+if [ -z "$(uci -q get fakehttp.main.interface_mode)" ]; then
+	if [ -n "$(uci -q get fakehttp.main.interface)" ]; then
 		uci -q set fakehttp.main.interface_mode=selected
 	else
 		uci -q set fakehttp.main.interface_mode=auto
 	fi
 fi
-if ! uci -q get fakesip.main.interface_mode >/dev/null 2>&1; then
-	if uci -q get fakesip.main.interface >/dev/null 2>&1; then
+if [ -z "$(uci -q get fakesip.main.interface_mode)" ]; then
+	if [ -n "$(uci -q get fakesip.main.interface)" ]; then
 		uci -q set fakesip.main.interface_mode=selected
 	else
 		uci -q set fakesip.main.interface_mode=auto

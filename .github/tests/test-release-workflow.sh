@@ -128,16 +128,6 @@ else
 	pass "the non-caching Go 1.23 setup has no stale cache dependency input"
 fi
 
-assert_contains "$workflow" \
-	'LIQUID_FORMULA_NORMALIZER_RACE=1 sh tests/shell/test_subscription_normalize.sh' \
-	"Go 1.26 stages, races, tests, and builds the subscription helper"
-assert_contains "$workflow" \
-	'GO_BIN=go sh tests/shell/test_subscription_normalize.sh' \
-	"the oldest supported Go toolchain stages, tests, and builds the subscription helper"
-assert_contains "$action" \
-	'name liquid-formula-subscription-gateway -perm -111' \
-	"both OpenWrt release builds require the second Go binary"
-
 mkdir -p "$test_tmp/bin" "$test_tmp/assets"
 printf 'package\n' > "$test_tmp/assets/liquid-formula_${pkg_version}_test.ipk"
 printf 'notes\n' > "$test_tmp/NOTES.md"
