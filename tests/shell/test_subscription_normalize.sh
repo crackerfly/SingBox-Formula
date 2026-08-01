@@ -91,6 +91,23 @@ run_go()
 	)
 }
 
+run_go_cross()
+{
+	(
+		cd "$STAGED_MODULE" || exit 1
+		GOOS=linux \
+		GOARCH="$1" \
+		CGO_ENABLED=0 \
+		GOMAXPROCS="${LIQUID_FORMULA_GO_MAX_PROCS:-2}" \
+		GOTOOLCHAIN=local \
+		GOMODCACHE="$GO_MOD_CACHE" \
+		GOCACHE="$GO_CACHE" \
+		GOFLAGS=-buildvcs=false \
+			"$GO_BIN" build -o /dev/null \
+			./cmd/liquid-formula-subscription-gateway
+	)
+}
+
 run_staged_go_tests()
 {
 	test_package=./cmd/liquid-formula-subscription-gateway
@@ -165,6 +182,20 @@ assert_command_success \
 	"the staged normalizer builds as an independent command" \
 	run_go build -o "$TEST_TMP/liquid-formula-subscription-gateway" \
 	./cmd/liquid-formula-subscription-gateway
+
+# 上面那次 build 只覆盖 runner 自己的 amd64。unix.Stat_t 这类结构体的字段
+# 宽度随架构变化 (Nlink 在 amd64 上是 uint64, 在 arm/arm64/386/mips/riscv64
+# 上是 uint32), 宿主机编译永远发现不了, 只会在 43 个 SDK 构建里全军覆没。
+#
+# 默认这三个覆盖了发布矩阵里全部三种字段布局: amd64 (64 位, Nlink uint64)、
+# arm64 (64 位, Nlink uint32)、arm (32 位)。每个冷缓存约 35 秒。想在本地跑
+# 全量, 用 LIQUID_FORMULA_CROSS_GOARCHES 覆盖:
+#   LIQUID_FORMULA_CROSS_GOARCHES='386 amd64 arm arm64 loong64 mips mips64 mipsle riscv64'
+for normalizer_goarch in ${LIQUID_FORMULA_CROSS_GOARCHES:-amd64 arm arm64}; do
+	assert_command_success \
+		"the staged normalizer cross-compiles for linux/$normalizer_goarch" \
+		run_go_cross "$normalizer_goarch"
+done
 
 NORMALIZER="$TEST_TMP/liquid-formula-subscription-gateway"
 assert_command_success \
