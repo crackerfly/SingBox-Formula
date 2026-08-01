@@ -463,7 +463,7 @@ func diskGCFileIdentityFromStat(
 		device: uint64(stat.Dev),
 		inode:  stat.Ino,
 		mode:   stat.Mode,
-		nlink:  stat.Nlink,
+		nlink:  uint64(stat.Nlink),
 		size:   stat.Size,
 		digest: digest,
 	}

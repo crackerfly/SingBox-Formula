@@ -252,7 +252,7 @@ func legacyReadMarkerAt(
 		markerDevice: uint64(after.Dev),
 		markerInode:  after.Ino,
 		markerMode:   after.Mode,
-		markerNlink:  after.Nlink,
+		markerNlink:  uint64(after.Nlink),
 	}
 	copy(token.markerBytes[:], raw)
 	if _, valid := token.digest(); !valid {
