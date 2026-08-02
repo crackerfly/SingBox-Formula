@@ -95,7 +95,7 @@
         "server_port": 53
       },
       {
-        "tag": "fakeip-dns",
+        "tag": "fake-ip-dns-server",
         "type": "fakeip",
         "inet4_range": "100.127.0.0/16",
         "inet6_range": "2001:2::/48"
@@ -175,7 +175,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -187,7 +187,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -258,7 +258,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -293,7 +293,7 @@
             ]
           }
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -307,7 +307,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -321,7 +321,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -352,7 +352,7 @@
             ]
           }
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -365,7 +365,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -418,7 +418,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       },
@@ -427,7 +427,7 @@
           "A",
           "AAAA"
         ],
-        "server": "fakeip-dns",
+        "server": "fake-ip-dns-server",
         "rewrite_ttl": 1,
         "action": "route"
       }
