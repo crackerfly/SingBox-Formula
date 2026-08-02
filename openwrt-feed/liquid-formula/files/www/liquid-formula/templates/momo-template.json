@@ -66,13 +66,13 @@
       },
       {
         "tag": "hgc-dns",
-        "type": "udp",
+        "type": "tcp",
         "server": "210.0.255.251",
         "server_port": 53
       },
       {
         "tag": "google-dns",
-        "type": "udp",
+        "type": "tcp",
         "server": "8.8.4.4",
         "server_port": 53
       },
@@ -84,7 +84,7 @@
       },
       {
         "tag": "bytedance-dns",
-        "type": "udp",
+        "type": "tcp",
         "server": "180.184.2.2",
         "server_port": 53
       },
@@ -544,8 +544,8 @@
       "tag": "Final",
       "type": "selector",
       "outbounds": [
-        "Proxies",
         "➜ Direct",
+        "Proxies",
         "Manual"
       ]
     },
@@ -642,7 +642,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/apple@cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-alibaba",
@@ -650,7 +650,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/alibaba.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-xiaomi",
@@ -658,7 +658,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/xiaomi.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-tencent",
@@ -666,7 +666,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/tencent.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-baidu",
@@ -674,7 +674,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/baidu.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-bytedance",
@@ -682,7 +682,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/bytedance.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-microsoft-cn",
@@ -690,7 +690,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/microsoft@cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-steam-cn",
@@ -698,7 +698,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/steam@cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-games-cn",
@@ -706,7 +706,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/category-games@cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-speedtest",
@@ -714,7 +714,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/category-speedtest.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-cn",
@@ -722,7 +722,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geoip-cn",
@@ -730,7 +730,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geoip/cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-ai-not-cn",
@@ -738,7 +738,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/category-ai-!cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-github",
@@ -746,7 +746,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/github.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-docker",
@@ -754,7 +754,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/docker.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-developer",
@@ -762,7 +762,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/category-dev.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-youtube",
@@ -770,7 +770,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/youtube.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-netflix",
@@ -778,7 +778,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/netflix.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geoip-netflix",
@@ -786,7 +786,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geoip/netflix.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-spotify",
@@ -794,7 +794,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/spotify.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-google",
@@ -802,7 +802,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/google.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-telegram",
@@ -810,7 +810,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/telegram.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geoip-telegram",
@@ -818,7 +818,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geoip/telegram.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-cloudflare",
@@ -826,7 +826,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/cloudflare.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-not-cn",
@@ -834,7 +834,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/geolocation-!cn.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-bing",
@@ -842,7 +842,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/bing.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-paypal",
@@ -850,7 +850,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/paypal.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       },
       {
         "tag": "geosite-ads",
@@ -858,7 +858,7 @@
         "format": "binary",
         "url": "https://cdn.gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/sing/geo/geosite/category-ads-all.srs",
         "download_detour": "➜ Direct",
-        "update_interval": "24h"
+        "update_interval": "8h"
       }
     ],
     "rules": [
