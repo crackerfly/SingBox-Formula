@@ -4,7 +4,7 @@
 
 [简体中文](#zh-cn) · [English](#english)
 
-**当前源码版本 / Current source version:** `1.8.7`
+**当前源码版本 / Current source version:** `1.8.8`
 
 <a id="zh-cn"></a>
 

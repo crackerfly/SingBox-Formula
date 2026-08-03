@@ -3,7 +3,6 @@ module github.com/haierkeys/singbox-subscribe-convert
 go 1.23.0
 
 require (
-	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/flosch/pongo2/v6 v6.0.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0

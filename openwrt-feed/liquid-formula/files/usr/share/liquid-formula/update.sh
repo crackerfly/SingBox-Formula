@@ -16,6 +16,7 @@ LOCK_DIR=${SBF_LOCK_DIR:-/var/run/liquid-formula/update.lock}
 LIFECYCLE_LOCK_DIR=${SBF_LIFECYCLE_LOCK_DIR:-/var/run/liquid-formula/lifecycle.lock}
 TMP_ROOT=${SBF_TMP_ROOT:-${TMPDIR:-/tmp}}
 LOG_LIMIT=262144
+COMMAND_LOG_MAX_LINES=${SBF_COMMAND_LOG_MAX_LINES:-200}
 
 WORK_DIR=
 OUTPUT_STAGE=
@@ -412,9 +413,17 @@ log() {
 }
 
 append_command_log() {
-	local file="$1" line
+	# A failing `sing-box check` can emit an unbounded diagnostic. Replaying all
+	# of it doubles into update.log and into rpcd's action.err capture, so keep
+	# a useful prefix and say plainly that the rest was dropped.
+	local file="$1" line count=0
 	[ -s "$file" ] || return 0
 	while IFS= read -r line || [ -n "$line" ]; do
+		count=$((count + 1))
+		if [ "$count" -gt "$COMMAND_LOG_MAX_LINES" ]; then
+			log "command output truncated after $COMMAND_LOG_MAX_LINES lines; see $file while this run is active" || return 1
+			return 0
+		fi
 		log "$line" || return 1
 	done < "$file"
 }

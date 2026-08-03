@@ -17,6 +17,12 @@ ACTION_ERR="$STATE_DIR/action.err"
 # overhead. Invalid UCI will make the updater fail fast, but the fallback must
 # never reintroduce a shorter watchdog than a valid operation may require.
 ACTION_TIMEOUT_FALLBACK=11160
+# rpcd captures the updater's stderr so failures outside update.log (exec
+# errors, missing applets) stay diagnosable. update.log rotates at 256 KiB, but
+# action.err had no ceiling at all — and it lives in /var/run, which is RAM on
+# every router this ships to. Keep the tail; the head of a runaway error stream
+# is never the interesting part.
+ACTION_ERR_LIMIT=${SBF_ACTION_ERR_LIMIT:-65536}
 
 # busybox 的 timeout applet 是可裁剪的, 并非所有固件都编入。缺失时降级为
 # 直接执行: 丢掉看门狗, 也好过整个动作以 127 退出而根本不运行。
@@ -148,7 +154,12 @@ template_lock_acquire() {
 	[ -d "$TEMPLATE_LOCK" ] && [ ! -L "$TEMPLATE_LOCK" ] || return 1
 	IFS=' ' read -r owner_pid owner_start extra < "$TEMPLATE_LOCK/owner" 2>/dev/null || return 75
 	[ -z "$extra" ] || return 75
-	case "$owner_pid:$owner_start" in ''|*[!0-9:]*) return 75 ;; esac
+	# Validate each field on its own. The old joined "$owner_pid:$owner_start"
+	# form could never match its '' branch, because the join always contains a
+	# colon, so an owner record with an empty PID or start time slipped through
+	# and was then compared against an empty _process_start result.
+	case "$owner_pid" in ''|*[!0-9]*) return 75 ;; esac
+	case "$owner_start" in ''|*[!0-9]*) return 75 ;; esac
 	current=$(_process_start "$owner_pid" 2>/dev/null || true)
 	[ -z "$current" ] || [ "$current" != "$owner_start" ] || return 75
 	rm -f "$TEMPLATE_LOCK/owner" && rmdir "$TEMPLATE_LOCK" || return 75
@@ -386,17 +397,39 @@ _state_write() {
 	mv "$tmp" "$ACTION_STATE"
 }
 
+_trim_action_err() {
+	# Must run as the very last statement of the worker: mv replaces the file
+	# the subshell's stderr is still attached to, so anything written after
+	# this call lands in the unlinked inode and is lost.
+	local size tmp
+	size=$(wc -c < "$ACTION_ERR" 2>/dev/null) || return 0
+	case "$size" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$size" -gt "$ACTION_ERR_LIMIT" ] || return 0
+	tmp=$(mktemp "$STATE_DIR/.action.err.XXXXXX") || return 0
+	{
+		printf 'action.err truncated: kept the last %s of %s bytes\n' "$ACTION_ERR_LIMIT" "$size"
+		tail -c "$ACTION_ERR_LIMIT" "$ACTION_ERR" 2>/dev/null
+	} > "$tmp" || { rm -f "$tmp"; return 0; }
+	chmod 0600 "$tmp" 2>/dev/null || true
+	mv "$tmp" "$ACTION_ERR" 2>/dev/null || rm -f "$tmp"
+	return 0
+}
+
 _lock_read() {
 	local extra
 	LOCK_PID= LOCK_START= LOCK_TOKEN=
 	[ -f "$ACTION_LOCK/owner" ] && [ ! -L "$ACTION_LOCK/owner" ] || return 1
 	IFS=' ' read -r LOCK_PID LOCK_START LOCK_TOKEN extra < "$ACTION_LOCK/owner" || return 1
 	[ -z "$extra" ] || return 1
-	case "$LOCK_PID:$LOCK_START:$LOCK_TOKEN" in *[!0-9:A-Za-z._-]*|::*|*::*) return 1 ;; esac
+	# Per-field validation for the same reason as template_lock_acquire: the
+	# joined form accepted a trailing empty field ("1:2:" contains no "::").
+	case "$LOCK_PID" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LOCK_START" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LOCK_TOKEN" in ''|*[!0-9A-Za-z._-]*) return 1 ;; esac
 }
 
 _lock_acquire() {
-	local current observed token claim parent self_start empty_wait
+	local current observed token claim parent self_start empty_wait attempts=0
 	_secure_state_dir || return 1
 	parent=${ACTION_LOCK%/*}
 	token="$$.$(date +%s).$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -405,33 +438,39 @@ _lock_acquire() {
 	claim=$(mktemp "$parent/.rpc-owner.XXXXXX") || return 1
 	printf '%s %s %s\n' "$$" "$self_start" "$token" > "$claim" || { rm -f "$claim"; return 1; }
 	chmod 0600 "$claim" || { rm -f "$claim"; return 1; }
-	if mkdir "$ACTION_LOCK" 2>/dev/null; then
-		mv "$claim" "$ACTION_LOCK/owner" || { rmdir "$ACTION_LOCK" 2>/dev/null; rm -f "$claim"; return 1; }
-		printf '%s' "$token"
-		return 0
-	fi
-	rm -f "$claim"
-	[ -d "$ACTION_LOCK" ] && [ ! -L "$ACTION_LOCK" ] || return 1
-	if [ ! -e "$ACTION_LOCK/owner" ]; then
-		empty_wait=0
-		while [ "$empty_wait" -lt 2 ] && [ ! -e "$ACTION_LOCK/owner" ]; do sleep 1; empty_wait=$((empty_wait + 1)); done
-		if [ ! -e "$ACTION_LOCK/owner" ]; then
-			rmdir "$ACTION_LOCK" 2>/dev/null || return 75
-			_lock_acquire
-			return
+	# Bounded retries. Recovering a stale lock used to recurse into
+	# _lock_acquire with no depth limit, so a peer that kept re-claiming the
+	# directory could drive the recursion arbitrarily deep. This matches the
+	# three-attempt cap that lifecycle_lock_acquire already uses.
+	while [ "$attempts" -lt 3 ]; do
+		attempts=$((attempts + 1))
+		if mkdir "$ACTION_LOCK" 2>/dev/null; then
+			mv "$claim" "$ACTION_LOCK/owner" || { rmdir "$ACTION_LOCK" 2>/dev/null; rm -f "$claim"; return 1; }
+			printf '%s' "$token"
+			return 0
 		fi
-	fi
-	_lock_read || return 75
-	current=$(_process_start "$LOCK_PID" 2>/dev/null || true)
-	[ -z "$current" ] || [ "$current" != "$LOCK_START" ] || return 75
-	observed=$(cat "$ACTION_LOCK/owner" 2>/dev/null) || return 75
-	[ "$observed" = "$LOCK_PID $LOCK_START $LOCK_TOKEN" ] || return 75
-	if [ -e "$ACTION_LOCK/ready" ]; then
-		[ -f "$ACTION_LOCK/ready" ] && [ ! -L "$ACTION_LOCK/ready" ] || return 75
-		rm -f "$ACTION_LOCK/ready" || return 75
-	fi
-	rm -f "$ACTION_LOCK/owner" && rmdir "$ACTION_LOCK" || return 75
-	_lock_acquire
+		[ -d "$ACTION_LOCK" ] && [ ! -L "$ACTION_LOCK" ] || { rm -f "$claim"; return 1; }
+		if [ ! -e "$ACTION_LOCK/owner" ]; then
+			empty_wait=0
+			while [ "$empty_wait" -lt 2 ] && [ ! -e "$ACTION_LOCK/owner" ]; do sleep 1; empty_wait=$((empty_wait + 1)); done
+			if [ ! -e "$ACTION_LOCK/owner" ]; then
+				rmdir "$ACTION_LOCK" 2>/dev/null || { rm -f "$claim"; return 75; }
+				continue
+			fi
+		fi
+		_lock_read || { rm -f "$claim"; return 75; }
+		current=$(_process_start "$LOCK_PID" 2>/dev/null || true)
+		[ -z "$current" ] || [ "$current" != "$LOCK_START" ] || { rm -f "$claim"; return 75; }
+		observed=$(cat "$ACTION_LOCK/owner" 2>/dev/null) || { rm -f "$claim"; return 75; }
+		[ "$observed" = "$LOCK_PID $LOCK_START $LOCK_TOKEN" ] || { rm -f "$claim"; return 75; }
+		if [ -e "$ACTION_LOCK/ready" ]; then
+			[ -f "$ACTION_LOCK/ready" ] && [ ! -L "$ACTION_LOCK/ready" ] || { rm -f "$claim"; return 75; }
+			rm -f "$ACTION_LOCK/ready" || { rm -f "$claim"; return 75; }
+		fi
+		rm -f "$ACTION_LOCK/owner" && rmdir "$ACTION_LOCK" || { rm -f "$claim"; return 75; }
+	done
+	rm -f "$claim"
+	return 75
 }
 
 _lock_release_token() {
@@ -467,6 +506,7 @@ _spawn_update() {
 		rc=$?
 		_state_write "$act" done "$rc" "$token"
 		_lock_release_token "$token"
+		_trim_action_err
 	# stderr 必须落盘而不是丢弃: updater 之外的失败(exec 错误、缺少 applet)
 	# 不会进 update.log, 丢掉之后就完全无从排查。stdout 仍走 /dev/null,
 	# 因为 rpcd 要等插件的 stdout 关闭才会返回。

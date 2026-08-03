@@ -12,13 +12,14 @@ PACKAGED_LOCALDNS_TEMPLATE="$DPI_DIR/files/www/liquid-formula/templates/localdns
 ROOT_MOMO_TEMPLATE_SHA256=748745145195b8def355b138e477bc5451902b3902c6f90094c15d4801209f17
 PACKAGED_MOMO_TEMPLATE_SHA256=1e1eacc65d944558b9a80fc0be8c99cf4435e480917b43ea7c705906efc5f801
 PACKAGED_LOCALDNS_TEMPLATE_SHA256=54fce714f1dcbbc243e1eea0e11a174a220bf04893b685b8b7b8dbfbb88e5ac2
-CONVERTER_SOURCE_TREE=d4f299087af3fdb87f7728846425d48edfeb7ae4
-DPI_SOURCE_TREE=4b609c3936b77563b1e845c4c39dbeb7628a5204
+FROZEN_CONVERTER_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.8.manifest"
+FROZEN_DPI_MANIFEST="$SCRIPT_DIR/fixtures/dpi-source-1.8.8.manifest"
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-dpi-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
 . "$SCRIPT_DIR/harness.sh"
+. "$SCRIPT_DIR/source_manifest.sh"
 
 assert_file_exists "$MAKEFILE" "DPI package Makefile exists"
 WAN_RESOLVER="$DPI_DIR/files/usr/share/liquid-formula-dpi/wan-resolver.sh"
@@ -38,11 +39,27 @@ assert_file_sha256 \
 	"$PACKAGED_LOCALDNS_TEMPLATE" \
 	"ships the authoritative local DNS template at its packaged path"
 
-converter_source_tree=$(git -C "$REPO_ROOT" rev-parse HEAD:openwrt-feed/liquid-formula/src 2>/dev/null || true)
-dpi_source_tree=$(git -C "$REPO_ROOT" rev-parse HEAD:openwrt-feed/liquid-formula/src-dpi 2>/dev/null || true)
-assert_equal "$CONVERTER_SOURCE_TREE" "$converter_source_tree" \
+# 1.8.6 moved source-integrity checking to offline manifests so shallow clones
+# and browser uploads still verify. These two assertions were the last holdouts
+# on `git rev-parse HEAD:<path>`: outside a Git checkout the command failed, the
+# `|| true` swallowed it, and the comparison silently degraded to "" vs a pinned
+# digest — a guaranteed failure that said nothing about the source tree.
+CONVERTER_MANIFEST_ACTUAL="$TEST_TMP/converter-source.manifest"
+assert_command_success \
+	"the archived converter tree can be manifested without Git history" \
+	write_source_manifest "$DPI_DIR/src" "$CONVERTER_MANIFEST_ACTUAL"
+assert_files_equal \
+	"$FROZEN_CONVERTER_MANIFEST" \
+	"$CONVERTER_MANIFEST_ACTUAL" \
 	"keeps the archived converter source tree unchanged"
-assert_equal "$DPI_SOURCE_TREE" "$dpi_source_tree" \
+
+DPI_MANIFEST_ACTUAL="$TEST_TMP/dpi-source.manifest"
+assert_command_success \
+	"the archived DPI trees can be manifested without Git history" \
+	write_source_manifest "$DPI_DIR/src-dpi" "$DPI_MANIFEST_ACTUAL"
+assert_files_equal \
+	"$FROZEN_DPI_MANIFEST" \
+	"$DPI_MANIFEST_ACTUAL" \
 	"keeps the archived third-party DPI source trees unchanged"
 
 # --- vendored sources are present and buildable from source ------------------

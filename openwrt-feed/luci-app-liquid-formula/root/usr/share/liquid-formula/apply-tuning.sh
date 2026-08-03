@@ -129,6 +129,15 @@ read_openwrt_release() {
 supports_cake_mq() {
 	local release major rest minor
 	release="$(read_openwrt_release)" || return 1
+	# Main-branch builds report a bare "SNAPSHOT" with no version numbers at
+	# all. They always track something newer than the last tagged release, so
+	# the numeric gate below must not reject them. Release-branch snapshots
+	# keep their numeric prefix ("24.10-SNAPSHOT") and stay comparable.
+	case "$release" in
+		SNAPSHOT|snapshot) return 0 ;;
+	esac
+	release=${release%-SNAPSHOT}
+	release=${release%-snapshot}
 	case "$release" in
 		*.*) ;;
 		*) return 1 ;;

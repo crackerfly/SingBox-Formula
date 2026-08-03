@@ -12,6 +12,10 @@ MAX_PAYLOAD=1200
 MAX_QUOTA=4194304
 MAX_IMAGE_DIMENSION=2048
 MULTIPART_ALLOWANCE=65536
+LOCK_DIR="$STAGING_DIR/.lock"
+LOCK_HELD=0
+LOCK_OWNER_PID=''
+LOCK_OWNER_START=''
 
 respond() {
 	local status="$1" message="$2"
@@ -117,6 +121,94 @@ quota_bytes_without() {
 	printf '%s\n' "$total"
 }
 
+# /proc/<pid>/stat field 22 is the process start time. Pairing it with the PID
+# makes an owner record immune to PID reuse: a recycled PID cannot resurrect a
+# dead holder's claim.
+process_start() {
+	local pid="$1" line
+	[ -r "/proc/$pid/stat" ] || return 1
+	IFS= read -r line < "/proc/$pid/stat" || return 1
+	printf '%s\n' "$line" | awk '{ sub(/^.*\) /, ""); split($0, f, " "); print f[20] }'
+}
+
+read_lock_owner() {
+	local extra
+	LOCK_OWNER_PID=''
+	LOCK_OWNER_START=''
+	[ -f "$LOCK_DIR/owner" ] && [ ! -L "$LOCK_DIR/owner" ] || return 1
+	IFS=' ' read -r LOCK_OWNER_PID LOCK_OWNER_START extra < "$LOCK_DIR/owner" || return 1
+	[ -z "$extra" ] || return 1
+	case "$LOCK_OWNER_PID" in ''|*[!0-9]*) return 1 ;; esac
+	case "$LOCK_OWNER_START" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+# uhttpd kills a CGI child outright once script_timeout expires, so the EXIT
+# trap cannot be relied on to remove the lock directory. Without recovery a
+# single killed upload would make every later upload return 409 until the next
+# reboot. Recover a lock whose owner process is provably gone instead.
+# Returns 0 when acquired, 1 on an internal error, 2 when a live holder owns it.
+upload_lock_acquire() {
+	local self_start attempts=0 grace observed owner_pid owner_start
+
+	self_start="$(process_start $$)" || return 1
+	case "$self_start" in ''|*[!0-9]*) return 1 ;; esac
+
+	while [ "$attempts" -lt 3 ]; do
+		attempts=$((attempts + 1))
+
+		if mkdir "$LOCK_DIR" 2>/dev/null; then
+			printf '%s %s\n' "$$" "$self_start" > "$LOCK_DIR/owner" || {
+				rmdir "$LOCK_DIR" 2>/dev/null || true
+				return 1
+			}
+			chmod 0600 "$LOCK_DIR/owner" 2>/dev/null || true
+			LOCK_HELD=1
+			return 0
+		fi
+
+		[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || return 1
+
+		# A live holder publishes its owner record immediately after mkdir.
+		# Give that window a moment before judging the record unusable.
+		grace=0
+		while [ "$grace" -lt 2 ] && ! read_lock_owner; do
+			sleep 1
+			grace=$((grace + 1))
+		done
+
+		if read_lock_owner; then
+			owner_pid="$LOCK_OWNER_PID"
+			owner_start="$LOCK_OWNER_START"
+			observed="$(process_start "$owner_pid" 2>/dev/null || true)"
+			if [ -n "$observed" ] && [ "$observed" = "$owner_start" ]; then
+				return 2
+			fi
+			# Re-read before deleting so a lock that changed hands while we
+			# were inspecting it is never broken on the strength of a record
+			# that has already been replaced.
+			read_lock_owner || continue
+			[ "$LOCK_OWNER_PID" = "$owner_pid" ] &&
+				[ "$LOCK_OWNER_START" = "$owner_start" ] || return 2
+			rm -f "$LOCK_DIR/owner" 2>/dev/null || return 2
+		else
+			# Still unreadable after the grace window: the writer died between
+			# mkdir and publication, or left a truncated record behind.
+			rm -f "$LOCK_DIR/owner" 2>/dev/null || return 2
+		fi
+
+		rmdir "$LOCK_DIR" 2>/dev/null || return 2
+	done
+
+	return 2
+}
+
+upload_lock_release() {
+	[ "$LOCK_HELD" = 1 ] || return 0
+	LOCK_HELD=0
+	rm -f "$LOCK_DIR/owner" 2>/dev/null || true
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
 case "${REQUEST_METHOD:-POST}" in
 	POST) ;;
 	*) fail '405 Method Not Allowed' 'POST required' ;;
@@ -186,18 +278,23 @@ prepare_directory "$STAGING_DIR" &&
 	prepare_directory "$PAYLOAD_DIR" ||
 	fail '500 Internal Server Error' 'unsafe upload directory'
 
-lock="$STAGING_DIR/.lock"
-if ! mkdir "$lock" 2>/dev/null; then
-	fail '409 Conflict' 'another upload is in progress'
-fi
 tmp_final=''
 fixed_pending="$pending"
 cleanup() {
 	rm -f "$pending" "$fixed_pending" 2>/dev/null || true
 	[ -z "$tmp_final" ] || rm -f "$tmp_final" 2>/dev/null || true
-	rmdir "$lock" 2>/dev/null || true
+	upload_lock_release
 }
+# Arm the trap before claiming the lock so an interruption in between still
+# runs the release path.
 trap cleanup EXIT INT TERM HUP
+upload_lock_acquire
+lock_status=$?
+case "$lock_status" in
+	0) ;;
+	2) fail '409 Conflict' 'another upload is in progress' ;;
+	*) fail '500 Internal Server Error' 'cannot claim the upload lock' ;;
+esac
 set +f
 for stale in "$STAGING_DIR"/.reply-* "$STAGING_DIR"/.candidate-* \
 	"$ASSET_DIR"/.upload.* "$PAYLOAD_DIR"/.upload.*; do

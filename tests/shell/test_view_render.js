@@ -1384,7 +1384,15 @@ async function exerciseTuningChoiceContracts() {
 		['24.10 hides cake_mq', '24.10.4', false],
 		['25.12 shows cake_mq', '25.12.0', true],
 		['later releases show cake_mq', '26.1.0', true],
-		['unknown releases hide cake_mq', 'snapshot', false],
+		// A bare SNAPSHOT is main-branch OpenWrt and always tracks something
+		// newer than the last tagged release, so it must not be lumped in with
+		// unparsable values. Keep these cases identical to the shell-side
+		// coverage in test_tuning.sh.
+		['main-branch SNAPSHOT shows cake_mq', 'SNAPSHOT', true],
+		['lowercase snapshot shows cake_mq', 'snapshot', true],
+		['25.12 branch snapshot shows cake_mq', '25.12-SNAPSHOT', true],
+		['pre-25.12 branch snapshot hides cake_mq', '24.10-SNAPSHOT', false],
+		['unparsable releases hide cake_mq', 'not-a-release', false],
 		['missing releases hide cake_mq', '', false]
 	];
 

@@ -11,7 +11,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/liquid-formula-manifest-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 CONVERTER_SOURCE="$REPO_ROOT/openwrt-feed/liquid-formula/src"
-FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.3.manifest"
+FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.8.manifest"
 
 BACKSLASH_ROOT="$TEST_TMP/backslash source"
 BACKSLASH_PATH='nested/back\slash.txt'
@@ -165,7 +165,7 @@ fi
 
 DELETE_ROOT="$TEST_TMP/converter-deletion"
 cp -a "$CONVERTER_SOURCE" "$DELETE_ROOT" || exit 1
-rm "$DELETE_ROOT/pkg/util/time.go" || exit 1
+rm "$DELETE_ROOT/pkg/fileurl/url.go" || exit 1
 write_source_manifest "$DELETE_ROOT" "$TEST_TMP/converter-deletion.manifest" || exit 1
 if cmp -s "$FROZEN_SOURCE_MANIFEST" "$TEST_TMP/converter-deletion.manifest"; then
 	record_failure "a converter source deletion alters the generated manifest"

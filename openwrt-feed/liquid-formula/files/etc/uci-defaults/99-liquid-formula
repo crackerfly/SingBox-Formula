@@ -34,7 +34,7 @@ set_if_missing() {
 }
 
 migrate_subscription_url_to_scalar() {
-	local exported value_type values first
+	local exported value_type first
 	exported=$(uci -q export liquid_formula) || return 1
 	value_type=$(
 		printf '%s\n' "$exported" | awk '
@@ -52,14 +52,41 @@ migrate_subscription_url_to_scalar() {
 	) || return 1
 	case "$value_type" in
 		list)
-			values=$(uci -q get liquid_formula.main.subscription_url) || values=
-			first=${values%% *}
+			# `uci -q get` joins list members with a single space, so the old
+			# ${values%% *} split silently truncated any member containing one
+			# and could not distinguish "one URL with a space" from "two URLs".
+			# Read the first ordered member straight out of the export instead,
+			# undoing uci's single-quote wrapping so the value stays byte-exact.
+			first=$(
+				printf '%s\n' "$exported" | awk '
+					BEGIN { q = sprintf("%c", 39) }
+					$1 == "config" {
+						in_main = ($3 == "\047main\047")
+						next
+					}
+					in_main && $1 == "list" && $2 == "subscription_url" && !found {
+						line = $0
+						sub(/^[ \t]*list[ \t]+subscription_url[ \t]+/, "", line)
+						if (substr(line, 1, 1) == q &&
+							substr(line, length(line), 1) == q)
+							line = substr(line, 2, length(line) - 2)
+						escaped = q "\\" q q
+						out = ""
+						while ((at = index(line, escaped)) > 0) {
+							out = out substr(line, 1, at - 1) q
+							line = substr(line, at + 4)
+						}
+						print out line
+						found = 1
+					}
+				'
+			) || return 1
 			uci -q delete liquid_formula.main.subscription_url || return 1
 			if [ -n "$first" ]; then
 				uci set "liquid_formula.main.subscription_url=$first" || return 1
 			fi
 			changed=1
-			logger -t liquid-formula "migrated ordered subscription list to its first URL for 1.8.6"
+			logger -t liquid-formula "migrated ordered subscription list to its first URL for 1.8.8"
 			;;
 		option|'') ;;
 		*) return 1 ;;

@@ -33,8 +33,17 @@ function bindTuning(o, option, fallback) {
 }
 
 function supportsCakeMq(release) {
-	var match = String(release || '').match(/^(\d+)\.(\d+)(?:\.|$)/);
-	var major, minor;
+	// Main-branch builds report a bare "SNAPSHOT" with no version numbers at
+	// all. They always track something newer than the last tagged release, so
+	// the numeric gate below must not reject them. Release-branch snapshots
+	// keep their numeric prefix ("24.10-SNAPSHOT") and stay comparable.
+	// Kept byte-for-byte in step with supports_cake_mq() in apply-tuning.sh.
+	var text = String(release || '').replace(/^\s+|\s+$/g, '');
+	var match, major, minor;
+	if (/^snapshot$/i.test(text))
+		return true;
+	text = text.replace(/-snapshot$/i, '');
+	match = text.match(/^(\d+)\.(\d+)(?:\.|$)/);
 	if (!match)
 		return false;
 	major = Number(match[1]);

@@ -454,9 +454,32 @@ run_apply
 assert_equal 1 "$?" "cake_mq is rejected before OpenWrt 25.12"
 assert_contains "$TEST_TMP/apply.err" 'cake_mq requires OpenWrt 25.12 or newer' "the release gate explains the cake_mq requirement"
 
+printf "DISTRIB_RELEASE='24.10-SNAPSHOT'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 1 "$?" "cake_mq is rejected on a release-branch snapshot before 25.12"
+
+printf "DISTRIB_RELEASE='not-a-release'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 1 "$?" "cake_mq is rejected when the OpenWrt release is unparsable"
+
+: > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 1 "$?" "cake_mq is rejected when the OpenWrt release is missing"
+
+# A bare SNAPSHOT is main-branch OpenWrt, which always tracks something newer
+# than the last tagged release. Treating it as "unknown" locked snapshot users
+# out of an option their kernel actually supports.
+printf "DISTRIB_RELEASE='SNAPSHOT'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 0 "$?" "cake_mq is accepted on a main-branch SNAPSHOT"
+
 printf "DISTRIB_RELEASE='snapshot'\n" > "$OPENWRT_RELEASE"
 run_apply
-assert_equal 1 "$?" "cake_mq is rejected when the OpenWrt release is unknown"
+assert_equal 0 "$?" "cake_mq is accepted on a lowercase snapshot"
+
+printf "DISTRIB_RELEASE='25.12-SNAPSHOT'\n" > "$OPENWRT_RELEASE"
+run_apply
+assert_equal 0 "$?" "cake_mq is accepted on a 25.12 release-branch snapshot"
 
 printf "DISTRIB_RELEASE='25.12.0'\n" > "$OPENWRT_RELEASE"
 run_apply

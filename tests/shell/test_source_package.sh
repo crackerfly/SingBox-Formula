@@ -15,7 +15,7 @@ WORKFLOW="$REPO_ROOT/.github/workflows/build.yml"
 UPSTREAM_MANIFEST="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.manifest"
 PATCHED_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-8222509.patched-paths"
 LOCAL_PATHS="$SCRIPT_DIR/fixtures/singbox-subscribe-convert-local-paths"
-FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.3.manifest"
+FROZEN_SOURCE_MANIFEST="$SCRIPT_DIR/fixtures/converter-source-1.8.8.manifest"
 UPSTREAM_COMMIT=8222509aff98229886d304ef72e1d0affb087a62
 GPL3_SHA256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 LUMBERJACK_MIT_SHA256=4eb222b860ec541a0f981a01de5454ba50d09d38b2d09fa6894ed0bf6331293e
@@ -46,7 +46,7 @@ assert_command_success \
 assert_files_equal \
 	"$FROZEN_SOURCE_MANIFEST" \
 	"$ACTUAL_SOURCE_MANIFEST" \
-	"keeps the working converter source identical to the frozen 1.8.3 manifest"
+	"keeps the working converter source identical to the frozen 1.8.8 manifest"
 
 WORKFLOW_ARCHES=$(python3 -S - "$WORKFLOW" <<'PY'
 import re
@@ -131,10 +131,26 @@ assert_file_content \
 	"$UPSTREAM_COMMIT" \
 	"$SOURCE_DIR/UPSTREAM_COMMIT" \
 	"records the full pinned upstream commit"
+# 1.8.8 dropped the unreferenced upstream pkg/util and pkg/safe_close packages
+# (and with them the machineid dependency), taking the retained upstream path
+# count from 35 to 25. Everything still listed must remain byte-exact.
 assert_file_line_count \
-	35 \
+	25 \
 	"$UPSTREAM_MANIFEST" \
-	"pins all 35 retained upstream paths"
+	"pins all 25 retained upstream paths"
+REMOVED_UPSTREAM_DIRS="pkg/util pkg/safe_close"
+REMOVED_STILL_PRESENT=
+for removed_dir in $REMOVED_UPSTREAM_DIRS; do
+	[ ! -e "$SOURCE_DIR/$removed_dir" ] || \
+		REMOVED_STILL_PRESENT="$REMOVED_STILL_PRESENT $removed_dir"
+done
+assert_empty \
+	"$REMOVED_STILL_PRESENT" \
+	"keeps the unreferenced upstream packages out of the converter source"
+assert_not_contains \
+	"$SOURCE_DIR/go.mod" \
+	'denisbrodbeck/machineid' \
+	"does not declare the machine-fingerprint dependency"
 UPSTREAM_MISMATCHES=
 while IFS="$(printf '\t')" read -r path expected_mode expected_hash; do
 	file="$SOURCE_DIR/$path"
@@ -236,8 +252,8 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.7[[:space:]]*$' \
-	"sets package version 1.8.7 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.8[[:space:]]*$' \
+	"sets package version 1.8.8 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \

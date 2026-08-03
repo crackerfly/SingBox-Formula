@@ -296,6 +296,7 @@ valid_template_file() {
 }
 
 VALIDATION_ERROR=
+EMIT_ERROR=
 DEFAULT_FOUND=0
 DEFAULT_ENABLED=0
 TEMPLATE_COUNT=0
@@ -325,6 +326,12 @@ validate_template() {
 
 emit_template() {
 	local sid="$1" enabled name file no_node url url_yaml name_yaml no_node_yaml enabled_yaml status
+	# OpenWrt's config_foreach ignores a callback's exit status and keeps
+	# iterating, so a failure on one template used to be followed by every
+	# remaining template still being appended to the staging file. Stop doing
+	# work as soon as the run is known to be doomed; emit_config's EMIT_ERROR
+	# check is what actually fails the run.
+	[ -z "$EMIT_ERROR" ] || return 1
 	config_get_bool enabled "$sid" enabled 1
 	config_get name "$sid" name "$sid"
 	config_get file "$sid" file "$sid.json"

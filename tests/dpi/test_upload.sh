@@ -84,4 +84,67 @@ TF_TEST_FIXTURE="$TMP/one.png" \
 grep -q '"path":"/etc/liquid-formula/assets/brand.png"' "$out"
 cmp "$TMP/one.png" "$TMP/assets/brand.png"
 
+# --- upload lock recovery ----------------------------------------------------
+# uhttpd SIGKILLs a CGI child once script_timeout expires, so the EXIT trap
+# never runs and the lock directory survives. Before 1.8.8 that made every
+# later upload fail with 409 until the next reboot.
+
+run_upload() {
+	CONTENT_LENGTH=128 \
+	QUERY_STRING='kind=logo&name=brand.png' \
+	LFAPP_STAGING_DIR="$TMP/staging" \
+	LFAPP_ASSET_DIR="$TMP/assets" \
+	LFAPP_PAYLOAD_DIR="$TMP/payloads" \
+	LFAPP_CGI_UPLOAD="$TMP/fake-cgi-upload" \
+	TF_TEST_FIXTURE="$TMP/one.png" \
+		"$CGI" </dev/null >"$1"
+}
+
+# A successful run must leave nothing behind.
+[ ! -e "$TMP/staging/.lock" ]
+
+# An owner record naming a process that no longer exists is recoverable.
+mkdir "$TMP/staging/.lock"
+printf '999999 4294967295\n' >"$TMP/staging/.lock/owner"
+out="$TMP/stale-owner.out"
+run_upload "$out"
+grep -q '"ok":true' "$out"
+[ ! -e "$TMP/staging/.lock" ]
+
+# A lock directory with no owner record at all — either a pre-1.8.8 leftover or
+# a writer killed between mkdir and publication — is also recoverable.
+mkdir "$TMP/staging/.lock"
+out="$TMP/no-owner.out"
+run_upload "$out"
+grep -q '"ok":true' "$out"
+[ ! -e "$TMP/staging/.lock" ]
+
+# A truncated or otherwise unparsable owner record must not wedge the lock.
+mkdir "$TMP/staging/.lock"
+printf 'not-a-pid\n' >"$TMP/staging/.lock/owner"
+out="$TMP/bad-owner.out"
+run_upload "$out"
+grep -q '"ok":true' "$out"
+[ ! -e "$TMP/staging/.lock" ]
+
+# A live owner still blocks, and the blocked run must not delete the holder's
+# claim on its way out.
+sleep 30 &
+holder=$!
+holder_start=$(awk '{ sub(/^.*\) /, ""); split($0, f, " "); print f[20] }' "/proc/$holder/stat")
+mkdir "$TMP/staging/.lock"
+printf '%s %s\n' "$holder" "$holder_start" >"$TMP/staging/.lock/owner"
+out="$TMP/live-owner.out"
+run_upload "$out"
+grep -qi 'another upload is in progress' "$out"
+[ -f "$TMP/staging/.lock/owner" ]
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+
+# Once that holder is gone the very next upload recovers the lock.
+out="$TMP/after-holder.out"
+run_upload "$out"
+grep -q '"ok":true' "$out"
+[ ! -e "$TMP/staging/.lock" ]
+
 echo "upload tests: ok"
