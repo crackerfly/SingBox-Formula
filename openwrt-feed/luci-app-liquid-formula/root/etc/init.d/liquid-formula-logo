@@ -23,6 +23,12 @@ FLUENT_LOGIN="/usr/share/ucode/luci/template/themes/fluent/header_login.ut"
 MARKER_START='<!-- LFAPP_CUSTOMLOGO_START -->'
 MARKER_END='<!-- LFAPP_CUSTOMLOGO_END -->'
 
+WATCH_HANDLER="/usr/share/liquid-formula/logo-template-changed"
+
+EXTRA_COMMANDS="check watch"
+EXTRA_HELP="	check	Re-apply the injection if a theme package upgrade removed it
+	watch	Foreground template watcher (started by procd, not for manual use)"
+
 log_info() {
 	logger -t "$LOG_TAG" "$*" 2>/dev/null || true
 }
@@ -272,10 +278,106 @@ body.logged-in header .flex1 > a.brand::before {
 	flex: 0 0 42px;
 	background: url("$logo_url") center / contain no-repeat;
 }
+
+/* luci-theme-fluent renders its brand as a real <img class="icon">, which
+   runtime.js rewrites. Painting it here too means the logo is correct on first
+   paint instead of flashing the theme default until the script runs, and it
+   keeps working when scripts are blocked. Geometry matches the theme's own
+   .header__title .icon rule (18px + 12px inline end) and the login card's
+   10px flex gap. */
+header .header__title.brand > img.icon,
+.login-form .ms-card-header > a.brand > img.icon {
+	display: none !important;
+}
+header .header__title.brand::before,
+.login-form .ms-card-header > a.brand::before {
+	content: "";
+	display: inline-block;
+	flex: 0 0 auto;
+	width: 18px;
+	height: 18px;
+	background: url("$logo_url") center / contain no-repeat;
+}
+header .header__title.brand::before {
+	margin-inline-end: 12px;
+}
 EOF
 	chmod 0644 "${RUNTIME_DIR}/runtime.css" 2>/dev/null || true
 
 	printf '%s\n%s\n%s\n' "$stamp" "$logo_url" "$favicon_url"
+}
+
+# Every template that must carry the marker while the feature is enabled.
+# Argon is included only when its exact supported version is installed, which
+# mirrors the injection decision made in apply_logos.
+injected_templates() {
+	printf '%s\n' "$BOOTSTRAP_HEADER" "$FLUENT_HEADER" "$FLUENT_LOGIN"
+	if argon_is_243; then
+		printf '%s\n' "$ARGON_LUA_HEADER" "$ARGON_LUA_LOGIN" \
+			"$ARGON_UCODE_HEADER" "$ARGON_UCODE_LOGIN"
+	fi
+}
+
+# Theme packages do not declare their templates as conffiles, so upgrading a
+# theme silently restores the pristine header and drops the injected block.
+# Returns 0 when at least one installed template has lost its marker.
+markers_missing() {
+	local template
+	# The loop runs in a pipeline subshell, so "a marker is gone" has to be
+	# signalled as a non-zero subshell exit rather than a plain return.
+	injected_templates | while IFS= read -r template; do
+		[ -f "$template" ] || continue
+		grep -Fq '</head>' "$template" 2>/dev/null || continue
+		grep -Fq "$MARKER_START" "$template" 2>/dev/null || exit 1
+	done || return 0
+	return 1
+}
+
+# Idempotent repair. Writing only when a marker is actually missing is what
+# keeps the watcher from feeding itself: a healthy tree produces no writes, so
+# no further inotify events.
+check() {
+	local enable
+
+	config_load customlogo
+	config_get enable main enable '0'
+	[ "$enable" = '1' ] || return 0
+
+	markers_missing || return 0
+	log_info "a theme template lost its Custom Logo block; re-applying"
+	apply_logos
+}
+
+watch() {
+	local dirs='' template dir seen
+
+	command -v inotifyd >/dev/null 2>&1 || {
+		log_info "inotifyd is unavailable; theme upgrades will not re-apply the logo automatically"
+		return 1
+	}
+	[ -x "$WATCH_HANDLER" ] || {
+		log_info "missing watcher handler: $WATCH_HANDLER"
+		return 1
+	}
+
+	for template in "$BOOTSTRAP_HEADER" "$ARGON_LUA_HEADER" "$ARGON_UCODE_HEADER" \
+		"$FLUENT_HEADER"; do
+		dir="${template%/*}"
+		[ -d "$dir" ] || continue
+		seen=0
+		for existing in $dirs; do
+			[ "$existing" = "$dir" ] && seen=1
+		done
+		[ "$seen" = '1' ] || dirs="$dirs $dir"
+	done
+
+	[ -n "$dirs" ] || {
+		log_info "no theme template directories to watch"
+		return 1
+	}
+
+	# shellcheck disable=SC2086
+	exec inotifyd "$WATCH_HANDLER" $dirs
 }
 
 apply_logos() {
@@ -331,6 +433,17 @@ apply_logos() {
 
 start_service() {
 	apply_logos
+
+	# A long-lived watcher is the only way to notice that a theme package
+	# replaced its header template; procd has no hook for another package's
+	# install transaction and this service is otherwise one-shot.
+	command -v inotifyd >/dev/null 2>&1 || return 0
+	[ -x "$WATCH_HANDLER" ] || return 0
+	procd_open_instance 'template-watch'
+	procd_set_param command "$initscript" watch
+	procd_set_param respawn 3600 10 0
+	procd_set_param stderr 1
+	procd_close_instance
 }
 
 stop_service() {

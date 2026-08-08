@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# inotifyd handler for the Custom Logo template watcher.
+#
+# inotifyd execs this with "<events> <dir> [file]", which is why it cannot be
+# the init script itself: rc.common would read the event mask as an action.
+# The arguments are deliberately ignored — a theme upgrade rewrites several
+# files at once and the repair is a whole-tree check either way.
+
+INIT="/etc/init.d/liquid-formula-logo"
+
+[ -x "$INIT" ] || exit 0
+
+# Coalesce the burst of events a package upgrade produces, and let the package
+# manager finish writing before looking at the tree.
+sleep 3
+
+# `check` only writes when a marker is genuinely missing, so a healthy tree
+# produces no filesystem change and therefore no new event to react to.
+"$INIT" check >/dev/null 2>&1
+
+exit 0

@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI app for Liquid Formula
-PKG_VERSION:=1.8.8
+PKG_VERSION:=1.8.11
 PKG_RELEASE:=1
 # irqbalance 是 Tuning Utility 页上的一个开关, 装了包就应该随时能开, 所以
 # 直接依赖它而不是让用户自己发现要另装。
@@ -53,6 +53,8 @@ define Package/luci-app-liquid-formula/postinst
 		chmod 0755 /www/cgi-bin/liquid-formula-upload 2>/dev/null || true
 	[ ! -f /usr/share/liquid-formula/apply-tuning.sh ] || \
 		chmod 0755 /usr/share/liquid-formula/apply-tuning.sh 2>/dev/null || true
+	[ ! -f /usr/share/liquid-formula/logo-template-changed ] || \
+		chmod 0755 /usr/share/liquid-formula/logo-template-changed 2>/dev/null || true
 	rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null || true
 	rm -rf /tmp/luci-modulecache /tmp/luci-templatecache 2>/dev/null || true
 	/etc/init.d/rpcd restart >/dev/null 2>&1 || exit 1

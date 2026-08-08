@@ -16,14 +16,14 @@ UCI_CONFIG="$REPO_ROOT/openwrt-feed/liquid-formula/files/etc/config/liquid_formu
 
 assert_make_top_level_contains \
 	"$MAIN_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.8[[:space:]]*$' \
-	"sets the main package version to 1.8.8"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.11[[:space:]]*$' \
+	"sets the main package version to 1.8.11"
 assert_make_top_level_contains \
 	"$LUCI_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.8[[:space:]]*$' \
-	"sets the LuCI package version to 1.8.8"
-assert_contains "$README" 'Current source version:[*][*][[:space:]]*`1\.8\.8`' \
-	"publishes 1.8.8 as the documented source version"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.11[[:space:]]*$' \
+	"sets the LuCI package version to 1.8.11"
+assert_contains "$README" 'Current source version:[*][*][[:space:]]*`1\.8\.11`' \
+	"publishes 1.8.11 as the documented source version"
 assert_contains "$README" '`user_agent`[[:space:]]*\|[[:space:]]*`v2rayN/7\.24\.4`' \
 	"documents the current default subscription User-Agent"
 assert_contains "$UCI_CONFIG" '^[[:space:]]*option[[:space:]]+subscription_url[[:space:]]' \

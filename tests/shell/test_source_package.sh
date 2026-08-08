@@ -252,8 +252,8 @@ assert_make_top_level_not_contains \
 
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
-	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.8[[:space:]]*$' \
-	"sets package version 1.8.8 in active top-level metadata"
+	'^[[:space:]]*PKG_VERSION[[:space:]]*:=[[:space:]]*1\.8\.11[[:space:]]*$' \
+	"sets package version 1.8.11 in active top-level metadata"
 assert_make_top_level_contains \
 	"$PACKAGE_MAKEFILE" \
 	'^[[:space:]]*PKG_RELEASE[[:space:]]*:=[[:space:]]*1[[:space:]]*$' \

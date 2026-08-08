@@ -80,4 +80,46 @@ grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/fluent"
 ! grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/argon-ut"
 stop_service
 
+
+# --- self-healing after a theme package upgrade -------------------------------
+# Theme packages do not declare their .ut templates as conffiles (verified
+# against luci-theme-fluent 1.0.8: control.tar.gz ships no conffiles file), so
+# an upgrade restores the pristine header and silently drops the injected block.
+argon_is_243() { return 0; }
+apply_logos
+
+# Healthy tree: check must not rewrite anything, or the watcher would feed
+# itself an endless event loop.
+for name in bootstrap fluent fluent-login; do
+	cp "$TMP/templates/$name" "$TMP/templates/$name.healthy"
+done
+check
+for name in bootstrap fluent fluent-login; do
+	cmp "$TMP/templates/$name.healthy" "$TMP/templates/$name"
+done
+
+# Simulate `apk upgrade luci-theme-fluent` replacing both templates.
+cp "$TMP/templates/fluent.original" "$TMP/templates/fluent"
+cp "$TMP/templates/fluent-login.original" "$TMP/templates/fluent-login"
+! grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/fluent"
+markers_missing
+check
+grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/fluent"
+grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/fluent-login"
+[ "$(grep -c 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/bootstrap")" -eq 1 ]
+
+# Disabled feature must stay disabled even if a template looks unpatched.
+config_get() {
+	local destination="$1" option="$3" value
+	case "$option" in
+		enable) value=0 ;;
+		logo|favicon) value="$TMP/assets/default-logo.svg" ;;
+		*) value="${4-}" ;;
+	esac
+	eval "$destination=\$value"
+}
+cp "$TMP/templates/fluent.original" "$TMP/templates/fluent"
+check
+! grep -q 'LFAPP_CUSTOMLOGO_START' "$TMP/templates/fluent"
+
 echo "theme runtime tests: ok"
